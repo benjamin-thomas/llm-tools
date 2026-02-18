@@ -18,6 +18,7 @@ import io
 import math
 import os
 import selectors
+import shutil
 import struct
 import subprocess
 import sys
@@ -25,9 +26,31 @@ import tempfile
 import threading
 import wave
 
-import evdev
-from evdev import ecodes
-import requests
+_MISSING = []
+try:
+    import evdev
+    from evdev import ecodes
+except ImportError:
+    _MISSING.append('python3-evdev')
+try:
+    import requests
+except ImportError:
+    _MISSING.append('python3-requests')
+
+for _cmd, _pkg in [('arecord', 'alsa-utils'), ('xdotool', 'xdotool'),
+                    ('xclip', 'xclip'), ('xprop', 'x11-utils')]:
+    if not shutil.which(_cmd):
+        _MISSING.append(_pkg)
+
+if _MISSING:
+    sys.exit(
+        "ERROR: missing dependencies: " + ", ".join(_MISSING) + "\n"
+        "  Install them with:\n"
+        "    sudo apt install " + " ".join(_MISSING) + "\n"
+        "  Also make sure your user is in the 'input' group:\n"
+        "    sudo usermod -aG input $USER\n"
+        "  Then re-login for the group change to take effect."
+    )
 
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 if not GROQ_API_KEY:
