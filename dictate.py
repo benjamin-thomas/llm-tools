@@ -5,8 +5,8 @@ Hold Super+F5 to record, release to transcribe and paste.
 Uses Groq's Whisper large-v3-turbo with auto language detection.
 
 System deps (no venv needed):
-    sudo apt install python3-evdev python3-requests alsa-utils xdotool xclip x11-utils
-    sudo usermod -aG input $USER  (then re-login)
+    sudo apt install python3-requests alsa-utils xdotool xclip x11-utils
+    pip install pynput
     export GROQ_API_KEY="gsk_..."
 
 Usage:
@@ -17,7 +17,6 @@ Usage:
 import io
 import math
 import os
-import selectors
 import shutil
 import struct
 import subprocess
@@ -28,10 +27,9 @@ import wave
 
 _MISSING = []
 try:
-    import evdev
-    from evdev import ecodes
+    from pynput import keyboard
 except ImportError:
-    _MISSING.append('python3-evdev')
+    _MISSING.append('pynput (pip install pynput)')
 try:
     import requests
 except ImportError:
@@ -45,11 +43,9 @@ for _cmd, _pkg in [('arecord', 'alsa-utils'), ('xdotool', 'xdotool'),
 if _MISSING:
     sys.exit(
         "ERROR: missing dependencies: " + ", ".join(_MISSING) + "\n"
-        "  Install them with:\n"
-        "    sudo apt install " + " ".join(_MISSING) + "\n"
-        "  Also make sure your user is in the 'input' group:\n"
-        "    sudo usermod -aG input $USER\n"
-        "  Then re-login for the group change to take effect."
+        "  Install with:\n"
+        "    sudo apt install python3-requests alsa-utils xdotool xclip x11-utils\n"
+        "    pip install pynput"
     )
 
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
@@ -104,20 +100,6 @@ def play_beep(path):
     ).start()
 
 
-# --- Keyboard detection -------------------------------------------------------
-
-def find_keyboards():
-    keyboards = []
-    for path in evdev.list_devices():
-        dev = evdev.InputDevice(path)
-        keys = dev.capabilities().get(ecodes.EV_KEY, [])
-        if ecodes.KEY_F5 in keys:
-            keyboards.append(dev)
-    if not keyboards:
-        sys.exit("No keyboard found.\n  Are you in the 'input' group? sudo usermod -aG input $USER")
-    return keyboards
-
-
 # --- Window detection & paste -------------------------------------------------
 
 def is_terminal():
@@ -157,8 +139,6 @@ def transcribe(wav_path):
 # --- Main ---------------------------------------------------------------------
 
 def main():
-    keyboards = find_keyboards()
-
     print('Dictate ready!')
     print('  Super+F5 = start recording (press again to restart)')
     print('  Super+F6 = stop & transcribe')
@@ -172,24 +152,20 @@ def main():
     super_held = False
     shift_held = False
     recording = False
-    arecord_pid = None
+    arecord_proc = None
     tmpfile = None
     lock = threading.Lock()
 
-    sel = selectors.DefaultSelector()
-    for kb in keyboards:
-        sel.register(kb, selectors.EVENT_READ)
-
     def stop_recording():
-        nonlocal recording, arecord_pid
-        if arecord_pid:
-            subprocess.run(['kill', '-INT', str(arecord_pid)], stderr=subprocess.DEVNULL)
-            os.waitpid(arecord_pid, 0)
-            arecord_pid = None
+        nonlocal recording, arecord_proc
+        if arecord_proc:
+            arecord_proc.send_signal(subprocess.signal.SIGINT)
+            arecord_proc.wait()
+            arecord_proc = None
         recording = False
 
     def start_recording():
-        nonlocal recording, arecord_pid, tmpfile
+        nonlocal recording, arecord_proc, tmpfile
         if recording:
             stop_recording()
             if tmpfile:
@@ -202,11 +178,11 @@ def main():
         tmp.close()
         recording = True
         play_beep(START_BEEP)
-        arecord_pid = subprocess.Popen(
+        arecord_proc = subprocess.Popen(
             ['arecord', '-f', 'S16_LE', '-r', str(SAMPLE_RATE),
              '-c', '1', '-t', 'wav', '-q', tmpfile],
             stderr=subprocess.DEVNULL,
-        ).pid
+        )
         print('[recording...]', end='', flush=True)
 
     def stop_and_transcribe():
@@ -228,65 +204,65 @@ def main():
             finally:
                 os.unlink(tmpfile)
                 tmpfile = None
-                # Clear dictating signal
                 try:
                     os.unlink('/tmp/dictating')
                 except FileNotFoundError:
                     pass
         else:
             print(' (no audio)')
-            # Clear dictating signal
             try:
                 os.unlink('/tmp/dictating')
             except FileNotFoundError:
                 pass
 
-    try:
-        while True:
-            for key, _ in sel.select():
-                for event in key.fileobj.read():
-                    if event.type != ecodes.EV_KEY:
-                        continue
-                    with lock:
-                        if event.code in (ecodes.KEY_LEFTMETA, ecodes.KEY_RIGHTMETA):
-                            super_held = event.value >= 1
-                            continue
+    SUPER_KEYS = {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r}
+    SHIFT_KEYS = {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r}
 
-                        if event.code in (ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT):
-                            shift_held = event.value >= 1
-                            continue
+    def on_press(key):
+        nonlocal super_held, shift_held
+        with lock:
+            if key in SUPER_KEYS:
+                super_held = True
+                return
+            if key in SHIFT_KEYS:
+                shift_held = True
+                return
+            if not super_held:
+                return
 
-                        if event.value != 1 or not super_held:
-                            continue
+            if key == keyboard.Key.f5:
+                start_recording()
+            elif key == keyboard.Key.f6 and recording:
+                stop_and_transcribe()
+            elif key == keyboard.Key.f7:
+                if shift_held:
+                    open('/tmp/tts-prev', 'w').close()
+                else:
+                    open('/tmp/tts-skip', 'w').close()
+            elif key == keyboard.Key.f8:
+                open('/tmp/tts-pause', 'w').close()
+            elif key == keyboard.Key.f9:
+                backend_file = '/tmp/tts-backend'
+                try:
+                    current = open(backend_file).read().strip()
+                except FileNotFoundError:
+                    current = 'piper'
+                new_backend = 'openai' if current == 'piper' else 'piper'
+                open(backend_file, 'w').write(new_backend)
+                print(f'\n[TTS backend: {new_backend}]')
 
-                        if event.code == ecodes.KEY_F5:
-                            start_recording()
-                        elif event.code == ecodes.KEY_F6 and recording:
-                            stop_and_transcribe()
-                        elif event.code == ecodes.KEY_F7:
-                            if shift_held:
-                                # TTS previous paragraph
-                                open('/tmp/tts-prev', 'w').close()
-                            else:
-                                # TTS skip to next paragraph
-                                open('/tmp/tts-skip', 'w').close()
-                        elif event.code == ecodes.KEY_F8:
-                            # TTS pause/resume toggle
-                            open('/tmp/tts-pause', 'w').close()
-                        elif event.code == ecodes.KEY_F9:
-                            # Toggle TTS backend
-                            backend_file = '/tmp/tts-backend'
-                            try:
-                                current = open(backend_file).read().strip()
-                            except FileNotFoundError:
-                                current = 'piper'
-                            new_backend = 'openai' if current == 'piper' else 'piper'
-                            open(backend_file, 'w').write(new_backend)
-                            print(f'\n[TTS backend: {new_backend}]')
-    except KeyboardInterrupt:
-        print('\nBye!')
-    finally:
-        sel.close()
+    def on_release(key):
+        nonlocal super_held, shift_held
+        if key in SUPER_KEYS:
+            super_held = False
+        elif key in SHIFT_KEYS:
+            shift_held = False
+
+    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+        try:
+            listener.join()
+        except KeyboardInterrupt:
+            print('\nBye!')
 
 
 if __name__ == '__main__':
