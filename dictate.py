@@ -17,12 +17,14 @@ Usage:
 import io
 import math
 import os
+import pathlib
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import wave
 
 _MISSING = []
@@ -52,6 +54,23 @@ GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 if not GROQ_API_KEY:
     sys.exit("ERROR: GROQ_API_KEY not set.\n  export GROQ_API_KEY='gsk_...'")
 
+# --- State directory ----------------------------------------------------------
+
+STATE_DIR = os.path.join(
+    os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'),
+    'dictate'
+)
+
+DICTATING_FILE = os.path.join(STATE_DIR, 'dictating')
+TTS_SKIP_FILE = os.path.join(STATE_DIR, 'tts-skip')
+TTS_PREV_FILE = os.path.join(STATE_DIR, 'tts-prev')
+TTS_PAUSE_FILE = os.path.join(STATE_DIR, 'tts-pause')
+TTS_BACKEND_FILE = os.path.join(STATE_DIR, 'tts-backend')
+
+BEEP_START = os.path.join(STATE_DIR, 'beep-start.wav')
+BEEP_STOP = os.path.join(STATE_DIR, 'beep-stop.wav')
+BEEP_READY = os.path.join(STATE_DIR, 'beep-ready.wav')
+
 SAMPLE_RATE = 16000
 API_URL = 'https://api.groq.com/openai/v1/audio/transcriptions'
 MODEL = 'whisper-large-v3-turbo'
@@ -61,6 +80,10 @@ TERMINALS = frozenset({
     'xfce4-terminal', 'terminator', 'tilix', 'st', 'sakura', 'guake',
     'terminology', 'wezterm', 'foot',
 })
+
+
+def ensure_state_dir():
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
 
 
 # --- Audio feedback -----------------------------------------------------------
@@ -81,16 +104,16 @@ def generate_wav(freq, duration=0.1, volume=0.15):
     return buf.getvalue()
 
 
-def make_beep_file(freq, duration=0.1):
-    tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-    tmp.write(generate_wav(freq, duration))
-    tmp.close()
-    return tmp.name
-
-
-START_BEEP = make_beep_file(880, 0.1)
-STOP_BEEP = make_beep_file(440, 0.1)
-READY_BEEP = make_beep_file(660, 0.15)
+def ensure_beep_files():
+    """Generate beep WAV files in STATE_DIR if they don't already exist."""
+    for path, freq, duration in [
+        (BEEP_START, 880, 0.1),
+        (BEEP_STOP, 440, 0.1),
+        (BEEP_READY, 660, 0.15),
+    ]:
+        if not os.path.exists(path):
+            with open(path, 'wb') as f:
+                f.write(generate_wav(freq, duration))
 
 
 def play_beep(path):
@@ -116,9 +139,11 @@ def is_terminal():
 
 
 def copy_and_paste(text):
+    # Strip control characters to prevent command injection in terminals
+    text = ''.join(c for c in text if c >= ' ')
     subprocess.run(['xclip', '-selection', 'clipboard'], input=text.encode(), check=True)
     if is_terminal():
-        import time; time.sleep(0.05)
+        time.sleep(0.05)
         subprocess.run(['xdotool', 'key', 'ctrl+shift+v'], check=True)
 
 
@@ -139,6 +164,9 @@ def transcribe(wav_path):
 # --- Main ---------------------------------------------------------------------
 
 def main():
+    ensure_state_dir()
+    ensure_beep_files()
+
     print('Dictate ready!')
     print('  Super+F5 = start recording (press again to restart)')
     print('  Super+F6 = stop & transcribe')
@@ -172,12 +200,12 @@ def main():
                 os.unlink(tmpfile)
             print(' (restarted)')
         # Signal that we're dictating (TTS extension watches this)
-        open('/tmp/dictating', 'w').close()
+        pathlib.Path(DICTATING_FILE).touch()
         tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
         tmpfile = tmp.name
         tmp.close()
         recording = True
-        play_beep(START_BEEP)
+        play_beep(BEEP_START)
         arecord_proc = subprocess.Popen(
             ['arecord', '-f', 'S16_LE', '-r', str(SAMPLE_RATE),
              '-c', '1', '-t', 'wav', '-q', tmpfile],
@@ -188,30 +216,27 @@ def main():
     def stop_and_transcribe():
         nonlocal tmpfile
         stop_recording()
-        play_beep(STOP_BEEP)
-        if tmpfile and os.path.getsize(tmpfile) > 0:
-            print(' transcribing...', end='', flush=True)
-            try:
+        play_beep(BEEP_STOP)
+        try:
+            if tmpfile and os.path.getsize(tmpfile) > 0:
+                print(' transcribing...', end='', flush=True)
                 text = transcribe(tmpfile)
                 if text:
                     print(f' "{text}"')
                     copy_and_paste(text)
-                    play_beep(READY_BEEP)
+                    play_beep(BEEP_READY)
                 else:
                     print(' (empty)')
-            except Exception as e:
-                print(f' ERROR: {e}')
-            finally:
+            else:
+                print(' (no audio)')
+        except Exception as e:
+            print(f' ERROR: {e}')
+        finally:
+            if tmpfile:
                 os.unlink(tmpfile)
                 tmpfile = None
-                try:
-                    os.unlink('/tmp/dictating')
-                except FileNotFoundError:
-                    pass
-        else:
-            print(' (no audio)')
             try:
-                os.unlink('/tmp/dictating')
+                os.unlink(DICTATING_FILE)
             except FileNotFoundError:
                 pass
 
@@ -236,19 +261,18 @@ def main():
                 stop_and_transcribe()
             elif key == keyboard.Key.f7:
                 if shift_held:
-                    open('/tmp/tts-prev', 'w').close()
+                    pathlib.Path(TTS_PREV_FILE).touch()
                 else:
-                    open('/tmp/tts-skip', 'w').close()
+                    pathlib.Path(TTS_SKIP_FILE).touch()
             elif key == keyboard.Key.f8:
-                open('/tmp/tts-pause', 'w').close()
+                pathlib.Path(TTS_PAUSE_FILE).touch()
             elif key == keyboard.Key.f9:
-                backend_file = '/tmp/tts-backend'
                 try:
-                    current = open(backend_file).read().strip()
+                    current = pathlib.Path(TTS_BACKEND_FILE).read_text().strip()
                 except FileNotFoundError:
                     current = 'piper'
                 new_backend = 'openai' if current == 'piper' else 'piper'
-                open(backend_file, 'w').write(new_backend)
+                pathlib.Path(TTS_BACKEND_FILE).write_text(new_backend)
                 print(f'\n[TTS backend: {new_backend}]')
 
     def on_release(key):

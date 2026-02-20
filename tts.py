@@ -2,12 +2,11 @@
 """TTS — Text-to-Speech with Piper (local) or OpenAI API (cloud).
 
 Reads text from stdin and plays it aloud.
-Toggle USE_OPENAI below to switch between backends.
 
 System deps:
     pip install piper-tts   (for Piper)
     sudo apt install alsa-utils
-    export OPENAI_API_KEY="sk-..."  (for OpenAI only)
+    OPENAI_API_KEY must be set (for OpenAI only)
 
 Usage:
     echo "Bonjour, comment ça va ?" | python3 tts.py
@@ -18,11 +17,21 @@ import os
 import subprocess
 import sys
 
+# --- State directory ----------------------------------------------------------
+
+STATE_DIR = os.path.join(
+    os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'),
+    'dictate'
+)
+
+TTS_BACKEND_FILE = os.path.join(STATE_DIR, 'tts-backend')
+
 # ── Backend selection ─────────────────────────────────────────
-# Read from /tmp/tts-backend, default to 'piper'
+
 def _read_backend():
     try:
-        return open('/tmp/tts-backend').read().strip()
+        with open(TTS_BACKEND_FILE) as f:
+            return f.read().strip()
     except FileNotFoundError:
         return 'piper'
 
@@ -47,7 +56,7 @@ def speak_openai(text):
 
     api_key = os.environ.get('OPENAI_API_KEY')
     if not api_key:
-        sys.exit("ERROR: OPENAI_API_KEY not set.\n  export OPENAI_API_KEY='sk-...'")
+        sys.exit("ERROR: OPENAI_API_KEY not set.")
 
     resp = requests.post(
         'https://api.openai.com/v1/audio/speech',
@@ -71,6 +80,10 @@ def speak_openai(text):
         proc.wait()
     except BrokenPipeError:
         pass
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait()
 
 
 def detect_language(text):
@@ -105,6 +118,13 @@ def speak_piper(text):
         proc_aplay.wait()
     except BrokenPipeError:
         pass
+    finally:
+        if proc_piper.poll() is None:
+            proc_piper.terminate()
+            proc_piper.wait()
+        if proc_aplay.poll() is None:
+            proc_aplay.terminate()
+            proc_aplay.wait()
 
 
 if USE_OPENAI:
