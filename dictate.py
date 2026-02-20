@@ -4,6 +4,12 @@
 Hold Super+F5 to record, release to transcribe and paste.
 Uses Groq's Whisper large-v3-turbo with auto language detection.
 
+NOTE: pynput uses XRecord (X11 extension) for global key listening. This won't
+work on Wayland. A future migration path: replace the keyboard listener with a
+long-running daemon that reacts to Unix signals (SIGUSR1, SIGUSR2, etc.).
+GNOME keybindings (configured via dconf custom-keybindings) would run
+`kill -SIGUSRx <pid>` on each shortcut press.
+
 System deps (no venv needed):
     sudo apt install python3-requests alsa-utils xdotool xclip x11-utils
     pip install pynput
