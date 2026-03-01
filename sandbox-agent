@@ -1,0 +1,122 @@
+#!/usr/bin/env ruby
+
+# Symlink to your ~/.local/bin/ directory
+
+require "fileutils"
+require "optparse"
+require "shellwords"
+require "tmpdir"
+
+flags = { tmux: false, rw_git: false }
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: sandbox-agent [flags] <project-dir> -- <command...>"
+  opts.separator ""
+  opts.separator "Run a CLI agent in a bwrap sandbox. Restricts file access to the"
+  opts.separator "project directory only — the agent cannot read or modify anything"
+  opts.separator "else under $HOME."
+  opts.separator ""
+
+  opts.on("--tmux",   "Start a sandboxed tmux server for sub-agent panes") { flags[:tmux] = true }
+  opts.on("--rw-git", "Allow writing to .git (default: read-only)")        { flags[:rw_git] = true }
+  opts.separator ""
+  opts.separator "Examples:"
+  opts.separator "  sandbox-agent . -- pi"
+  opts.separator "  sandbox-agent --tmux . -- pi"
+  opts.separator "  sandbox-agent /path/to/project -- pi -p 'fix the bug'"
+end
+
+parser.order!
+project_dir = File.expand_path(ARGV.shift || abort(parser.help))
+ARGV.shift if ARGV.first == "--"
+abort "No command specified.\n\n#{parser.help}" if ARGV.empty?
+cmd = ARGV.dup
+
+# --- helpers ---
+
+def ro(src, dest = src) = ["--ro-bind", src, dest]
+def rw(src, dest = src) = ["--bind",    src, dest]
+
+def require_dir!(path, label)
+  abort "#{label} not found: #{path}" unless File.directory?(path)
+end
+
+def require_file!(path, label)
+  abort "#{label} not found: #{path}" unless File.exist?(path)
+end
+
+# --- detect paths ---
+
+home     = ENV.fetch("HOME")
+nvm_dir  = ENV.fetch("NVM_DIR", "#{home}/.nvm")
+node_bin = File.dirname(`which node`.chomp)
+term     = ENV.fetch("TERM", "xterm-256color")
+
+gitconfig      = "#{home}/.gitconfig"
+password_store = "#{home}/.password-store"
+gnupg_dir      = "#{home}/.gnupg"
+gpg_agent_dir  = "/run/user/#{Process.uid}/gnupg"
+resolvconf_dir = "/run/resolvconf"
+
+# --- validate required paths ---
+
+require_dir!  project_dir,    "Project directory"
+require_dir!  nvm_dir,        "NVM directory"
+require_file! gitconfig,      "Git config"
+require_dir!  password_store, "Password store (~/.password-store)"
+require_dir!  gnupg_dir,      "GnuPG directory (~/.gnupg)"
+require_dir!  gpg_agent_dir,  "GPG agent socket dir"
+require_dir!  resolvconf_dir, "DNS resolver (/run/resolvconf)"
+
+# --- build bwrap args ---
+
+args = []
+
+args.push(*ro("/usr"), *ro("/lib"), *ro("/lib64"),
+          *ro("/bin"), *ro("/sbin"), *ro("/etc"))
+args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp")
+
+args.push(*ro(resolvconf_dir))
+
+args.push("--tmpfs", home)
+args.push(*ro(nvm_dir))
+args.push(*ro(gitconfig))
+args.push(*rw("#{home}/.pi"))
+args.push(*rw(project_dir))
+
+args.push(*ro(password_store), *ro(gnupg_dir), *ro(gpg_agent_dir))
+
+if !flags[:rw_git] && File.directory?("#{project_dir}/.git")
+  args.push(*ro("#{project_dir}/.git"))
+end
+
+args.push("--unshare-pid", "--die-with-parent", "--chdir", project_dir)
+
+args.push("--clearenv",
+          "--setenv", "HOME", home,
+          "--setenv", "PATH", "#{node_bin}:/usr/local/bin:/usr/bin:/bin",
+          "--setenv", "TERM", term)
+
+# --- tmux sub-agent support ---
+
+if flags[:tmux]
+  socket_dir = Dir.mktmpdir("pi-sandbox-")
+  at_exit { FileUtils.rm_rf(socket_dir) }
+
+  args.push(*rw(socket_dir), "--setenv", "TMUX_TMPDIR", socket_dir)
+
+  warn "Sandbox tmux socket: #{socket_dir}/default"
+  warn "Attach from another terminal:  tmux -S #{socket_dir}/default attach"
+  warn "---"
+
+  cmd = [
+    "tmux", "-f", "/dev/null",
+    "set", "-g", "prefix", "C-o", ";",
+    "bind", "-n", "M-left", "prev", ";",
+    "bind", "-n", "M-right", "next", ";",
+    "new-session", "-s", "sandbox", cmd.shelljoin,
+  ]
+end
+
+args.push("--", *cmd)
+exec("bwrap", *args)
