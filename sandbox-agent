@@ -86,6 +86,24 @@ args.push(*ro(gitconfig))
 args.push(*rw("#{home}/.pi"))
 args.push(*rw(project_dir))
 
+# Bind-mount symlink targets so relative symlinks work
+Dir.children(project_dir).each do |name|
+  full = File.join(project_dir, name)
+  next unless File.symlink?(full)
+
+  target = File.realpath(full)
+  next if target.start_with?(project_dir + "/") # already inside project dir
+
+  if File.directory?(target)
+    warn "Binding symlink target: #{target}"
+    args.push(*rw(target))
+    # Also protect .git inside symlink targets
+    if !flags[:rw_git] && File.directory?("#{target}/.git")
+      args.push(*ro("#{target}/.git"))
+    end
+  end
+end
+
 args.push(*ro(password_store), *ro(gnupg_dir), *ro(gpg_agent_dir))
 
 if !flags[:rw_git] && File.directory?("#{project_dir}/.git")
