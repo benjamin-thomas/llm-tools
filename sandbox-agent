@@ -7,7 +7,7 @@ require "optparse"
 require "shellwords"
 require "tmpdir"
 
-flags = { tmux: false, rw_git: false }
+flags = { rw_git: false }
 
 parser = OptionParser.new do |opts|
   opts.banner = "Usage: sandbox-agent [flags] <project-dir> -- <command...>"
@@ -17,12 +17,14 @@ parser = OptionParser.new do |opts|
   opts.separator "else under $HOME."
   opts.separator ""
 
-  opts.on("--tmux",   "Start a sandboxed tmux server for sub-agent panes") { flags[:tmux] = true }
-  opts.on("--rw-git", "Allow writing to .git (default: read-only)")        { flags[:rw_git] = true }
+  opts.on("--rw-git", "Allow writing to .git (default: read-only)") { flags[:rw_git] = true }
+  opts.separator ""
+  opts.separator "The agent always runs inside a sandboxed tmux server so sub-agent"
+  opts.separator "panes stay confined. Use Ctrl-o as the tmux prefix (Alt-left/right"
+  opts.separator "to switch windows)."
   opts.separator ""
   opts.separator "Examples:"
   opts.separator "  sandbox-agent . -- pi"
-  opts.separator "  sandbox-agent --tmux . -- pi"
   opts.separator "  sandbox-agent /path/to/project -- pi -p 'fix the bug'"
 end
 
@@ -97,26 +99,24 @@ args.push("--clearenv",
           "--setenv", "PATH", "#{node_bin}:/usr/local/bin:/usr/bin:/bin",
           "--setenv", "TERM", term)
 
-# --- tmux sub-agent support ---
+# --- sandboxed tmux server ---
 
-if flags[:tmux]
-  socket_dir = Dir.mktmpdir("pi-sandbox-")
-  at_exit { FileUtils.rm_rf(socket_dir) }
+socket_dir = Dir.mktmpdir("pi-sandbox-")
+at_exit { FileUtils.rm_rf(socket_dir) }
 
-  args.push(*rw(socket_dir), "--setenv", "TMUX_TMPDIR", socket_dir)
+args.push(*rw(socket_dir), "--setenv", "TMUX_TMPDIR", socket_dir)
 
-  warn "Sandbox tmux socket: #{socket_dir}/default"
-  warn "Attach from another terminal:  tmux -S #{socket_dir}/default attach"
-  warn "---"
+warn "Sandbox tmux socket: #{socket_dir}/default"
+warn "Attach from another terminal:  tmux -S #{socket_dir}/default attach"
+warn "---"
 
-  cmd = [
-    "tmux", "-f", "/dev/null",
-    "set", "-g", "prefix", "C-o", ";",
-    "bind", "-n", "M-left", "prev", ";",
-    "bind", "-n", "M-right", "next", ";",
-    "new-session", "-s", "sandbox", cmd.shelljoin,
-  ]
-end
+cmd = [
+  "tmux", "-f", "/dev/null",
+  "set", "-g", "prefix", "C-o", ";",
+  "bind", "-n", "M-left", "prev", ";",
+  "bind", "-n", "M-right", "next", ";",
+  "new-session", "-s", "sandbox", cmd.shelljoin,
+]
 
 args.push("--", *cmd)
 exec("bwrap", *args)
