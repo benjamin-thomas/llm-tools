@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Dictate — Push-to-Talk Speech-to-Text via Groq API (X11).
+"""Dictate — Push-to-Talk Speech-to-Text (X11).
 
 Hold Super+F5 to record, release to transcribe and paste.
-Uses Groq's Whisper large-v3-turbo with auto language detection.
+Supports multiple providers: groq (default), openai, mistral.
+Passes the previous transcription as prompt for better contextual accuracy.
 
 NOTE: pynput uses XRecord (X11 extension) for global key listening. This won't
 work on Wayland. A future migration path: replace the keyboard listener with a
@@ -13,11 +14,16 @@ GNOME keybindings (configured via dconf custom-keybindings) would run
 System deps (no venv needed):
     sudo apt install python3-requests alsa-utils xdotool xclip x11-utils
     pip install pynput
+
+Set API key for your chosen provider:
     export GROQ_API_KEY="gsk_..."
+    export OPENAI_API_KEY="sk-..."
+    export MISTRAL_API_KEY="..."
 
 Usage:
-    python3 dictate.py
-    (or chmod +x dictate.py && ./dictate.py)
+    python3 dictate.py              # uses groq by default
+    python3 dictate.py openai       # use OpenAI
+    python3 dictate.py mistral      # use Mistral
 """
 
 import io
@@ -56,9 +62,40 @@ if _MISSING:
         "    pip install pynput"
     )
 
-GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
-if not GROQ_API_KEY:
-    sys.exit("ERROR: GROQ_API_KEY not set.\n  export GROQ_API_KEY='gsk_...'")
+# --- Provider configuration ---------------------------------------------------
+
+PROVIDERS = {
+    'groq': {
+        'api_url': 'https://api.groq.com/openai/v1/audio/transcriptions',
+        'model': 'whisper-large-v3',
+        'env_key': 'GROQ_API_KEY',
+        'supports_prompt': True,
+    },
+    'openai': {
+        'api_url': 'https://api.openai.com/v1/audio/transcriptions',
+        'model': 'gpt-4o-mini-transcribe',
+        'env_key': 'OPENAI_API_KEY',
+        'supports_prompt': True,
+    },
+    'mistral': {
+        'api_url': 'https://api.mistral.ai/v1/audio/transcriptions',
+        'model': 'voxtral-mini-latest',
+        'env_key': 'MISTRAL_API_KEY',
+        'supports_prompt': False,
+    },
+}
+
+if len(sys.argv) < 2 or sys.argv[1] not in PROVIDERS:
+    sys.exit(f"Usage: {sys.argv[0]} <provider>\n  Providers: {', '.join(PROVIDERS)}")
+PROVIDER = sys.argv[1]
+
+_conf = PROVIDERS[PROVIDER]
+API_URL = _conf['api_url']
+MODEL = _conf['model']
+SUPPORTS_PROMPT = _conf['supports_prompt']
+API_KEY = os.environ.get(_conf['env_key'])
+if not API_KEY:
+    sys.exit(f"ERROR: {_conf['env_key']} not set.\n  export {_conf['env_key']}='...'")
 
 # --- State directory ----------------------------------------------------------
 
@@ -78,8 +115,6 @@ BEEP_STOP = os.path.join(STATE_DIR, 'beep-stop.wav')
 BEEP_READY = os.path.join(STATE_DIR, 'beep-ready.wav')
 
 SAMPLE_RATE = 16000
-API_URL = 'https://api.groq.com/openai/v1/audio/transcriptions'
-MODEL = 'whisper-large-v3-turbo'
 
 TERMINALS = frozenset({
     'gnome-terminal', 'xterm', 'urxvt', 'alacritty', 'kitty', 'konsole',
@@ -155,13 +190,16 @@ def copy_and_paste(text):
 
 # --- Transcription ------------------------------------------------------------
 
-def transcribe(wav_path):
+def transcribe(wav_path, prompt=''):
+    data = {'model': MODEL}
+    if prompt and SUPPORTS_PROMPT:
+        data['prompt'] = prompt
     with open(wav_path, 'rb') as f:
         resp = requests.post(
             API_URL,
-            headers={'Authorization': f'Bearer {GROQ_API_KEY}'},
+            headers={'Authorization': f'Bearer {API_KEY}'},
             files={'file': ('audio.wav', f, 'audio/wav')},
-            data={'model': MODEL},
+            data=data,
         )
     resp.raise_for_status()
     return resp.json()['text'].strip()
@@ -173,7 +211,7 @@ def main():
     ensure_state_dir()
     ensure_beep_files()
 
-    print('Dictate ready!')
+    print(f'Dictate ready!  [provider: {PROVIDER}, model: {MODEL}]')
     print('  Super+F5 = start recording (press again to restart)')
     print('  Super+F6 = stop & transcribe')
     print('  Super+F7 = TTS skip to next paragraph')
@@ -188,6 +226,7 @@ def main():
     recording = False
     arecord_proc = None
     tmpfile = None
+    last_text = ''
     lock = threading.Lock()
 
     def stop_recording():
@@ -220,17 +259,18 @@ def main():
         print('[recording...]', end='', flush=True)
 
     def stop_and_transcribe():
-        nonlocal tmpfile
+        nonlocal tmpfile, last_text
         stop_recording()
         play_beep(BEEP_STOP)
         try:
             if tmpfile and os.path.getsize(tmpfile) > 0:
                 print(' transcribing...', end='', flush=True)
-                text = transcribe(tmpfile)
+                text = transcribe(tmpfile, prompt=last_text)
                 if text:
                     print(f' "{text}"')
                     copy_and_paste(text)
                     play_beep(BEEP_READY)
+                    last_text = text
                 else:
                     print(' (empty)')
             else:
