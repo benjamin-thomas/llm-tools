@@ -27,7 +27,7 @@ Set API key for your chosen provider:
     export MISTRAL_API_KEY="..."
 
 Usage:
-    python3 dictate.py              # uses groq by default
+    python3 dictate.py groq         # use Groq
     python3 dictate.py openai       # use OpenAI
     python3 dictate.py mistral      # use Mistral
 """
@@ -249,7 +249,7 @@ def main() -> None:
             if tmpfile:
                 os.unlink(tmpfile)
             print(' (restarted)')
-        # Signal that we're dictating (TTS extension watches this)
+        # Signal that recording is active for external status integrations.
         pathlib.Path(DICTATING_FILE).touch()
         tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
         tmpfile = tmp.name

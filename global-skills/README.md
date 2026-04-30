@@ -21,7 +21,7 @@ Common commands:
 ```bash
 llm-skills doctor
 llm-skills --color always doctor
-llm-skills import codex tmux-orchestrator
+llm-skills import codex worker-orchestrator
 llm-skills import pi tdd
 llm-skills install --all
 ```

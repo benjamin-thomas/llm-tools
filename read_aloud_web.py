@@ -8,7 +8,8 @@
 
 """Read web content aloud, paragraph by paragraph.
 
-Supports plain articles (via w3m) and Discourse forum posts (via the JSON API).
+Supports plain articles (via w3m), Discourse forum posts (via the JSON API),
+Reddit threads (via the JSON API), and Hacker News threads.
 Uses OpenAI TTS with a local on-disk cache and background prefetching.
 
 Usage:
@@ -27,11 +28,12 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import select
 import subprocess
 import sys
-import select
 import tty
 import termios
+import urllib.parse
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, Literal, TypedDict, cast
 
@@ -222,6 +224,98 @@ def extract_reddit(url: str) -> str:
     return '\n\n'.join(parts)
 
 
+def _plain_text(node: Any, *, separator: str = ' ') -> str:
+    text = str(node.get_text(separator=separator)).strip()
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n[ \t]+', '\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text
+
+
+def _int_attr(node: Any, name: str, default: int = 0) -> int:
+    if node is None:
+        return default
+    raw: object = cast(object, node.get(name, default))
+    if isinstance(raw, list):
+        raw = cast(object, raw[0]) if raw else default
+    try:
+        return int(str(raw))
+    except ValueError:
+        return default
+
+
+def parse_hacker_news_html(html: str) -> str:
+    """Return a readable Hacker News item page in conversation order.
+
+    HN renders comments as a pre-order tree. The `td.ind indent=N` attribute
+    gives each comment's nesting level, so a stack is enough to recover the
+    parent speaker while preserving the on-page conversation order.
+    """
+    from bs4 import BeautifulSoup as _BeautifulSoup  # type: ignore[reportMissingImports]
+    BeautifulSoup = cast(Any, _BeautifulSoup)
+
+    soup = BeautifulSoup(html, 'html.parser')
+    parts: list[str] = []
+
+    story = soup.select_one('tr.athing.submission')
+    if story is not None:
+        title_node = story.select_one('.titleline > a') or story.select_one('td.title a')
+        title = _plain_text(title_node) if title_node is not None else ''
+        if title:
+            parts.append(title)
+
+        subtext_row = story.find_next_sibling('tr')
+        author_node = subtext_row.select_one('.subtext .hnuser') if subtext_row is not None else None
+        author = _plain_text(author_node) if author_node is not None else 'unknown'
+        toptext_node = soup.select_one('.toptext')
+        toptext = _plain_text(toptext_node, separator='\n\n') if toptext_node is not None else ''
+        if toptext:
+            parts.append(f"Original post by {author}:\n{toptext}")
+
+    author_stack: list[str] = []
+    for row in cast(list[Any], soup.select('tr.athing.comtr')):
+        indent = _int_attr(row.select_one('td.ind'), 'indent')
+        author_node = row.select_one('.hnuser')
+        author = _plain_text(author_node) if author_node is not None else 'unknown'
+
+        comment_node = row.select_one('.comment')
+        if comment_node is None:
+            continue
+        for reply_node in cast(list[Any], comment_node.select('.reply')):
+            reply_node.decompose()
+        body_node = comment_node.select_one('.commtext') or comment_node
+        body = _plain_text(body_node, separator='\n\n')
+        if not body or body in {'[deleted]', '[dead]', '[flagged]'}:
+            continue
+
+        if indent <= 0 or not author_stack:
+            header = f"Comment by {author}:"
+        else:
+            parent_author = author_stack[indent - 1] if indent - 1 < len(author_stack) else 'parent comment'
+            header = f"{author} replies to {parent_author}:"
+        parts.append(f"{header}\n{body}")
+
+        if indent < len(author_stack):
+            author_stack[indent] = author
+            del author_stack[indent + 1:]
+        else:
+            author_stack.extend(['parent comment'] * (indent - len(author_stack)))
+            author_stack.append(author)
+
+    return '\n\n'.join(parts)
+
+
+def extract_hacker_news(url: str) -> str:
+    """Fetch a Hacker News item page and return a readable comment thread."""
+    import urllib.request
+
+    print(f"Fetching Hacker News thread: {url}")
+    req = urllib.request.Request(url, headers={'User-Agent': 'read-aloud-web/1.0'})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        html = resp.read().decode('utf-8', errors='replace')
+    return parse_hacker_news_html(html)
+
+
 def extract_discourse(url: str) -> str:
     """Fetch a Discourse topic via its JSON API and return plain text
     with per-post headers. Strips 'in reply to' quote asides."""
@@ -380,19 +474,25 @@ def main() -> None:
 
     print(f"\033[2mCache: {CACHE_DIR}\033[0m\n")
 
-    # Auto-detect local files (path-like) and Reddit URLs (unambiguous hostname)
+    # Auto-detect local files and thread URLs with unambiguous hostnames.
     is_file = url.startswith(('~', '/', './', '../')) or not url.startswith(('http://', 'https://'))
+    parsed_url = urllib.parse.urlparse(url)
+    host = parsed_url.netloc.lower()
     if is_file:
         print("Detected: local file")
         choice = 'file'
     elif 'reddit.com' in url:
         print("Detected: Reddit thread")
         choice = '3'
+    elif host in {'news.ycombinator.com', 'www.news.ycombinator.com'} and parsed_url.path == '/item':
+        print("Detected: Hacker News thread")
+        choice = '4'
     else:
         print("What kind of content?")
         print("  [1] Article / web page (default)")
         print("  [2] Discourse forum post")
         print("  [3] Reddit thread")
+        print("  [4] Hacker News thread")
         choice = input("> ").strip()
 
     print("\nWhich voice?")
@@ -410,6 +510,8 @@ def main() -> None:
         text = extract_discourse(url)
     elif choice == '3':
         text = extract_reddit(url)
+    elif choice == '4':
+        text = extract_hacker_news(url)
     else:
         print(f"Fetching: {url}")
         text = extract_text(url)

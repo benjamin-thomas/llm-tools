@@ -211,36 +211,6 @@ DEPRECATED_DEFAULT_WORKER_NAMES: tuple[str, ...] = (
     "worker.codex-gpt5",
 )
 
-ORCHESTRATOR_BOOTSTRAP_PROMPT = """\
-You are the human-facing orchestrator inside a local tmux-orchestrator session.
-
-The human talks to you in natural language. Your job is to help coordinate visible tmux worker panes through the local CLI, while keeping the human in the loop.
-
-Use these commands when useful:
-- tmux-orchestrator status
-- tmux-orchestrator send <worker.name> "<task>"
-- tmux-orchestrator broadcast --to idle "<task>"
-- tmux-orchestrator wait <job_id-or-parent_job_id> --watch
-- tmux-orchestrator mark-done <worker.name> <job_id>
-- tmux-orchestrator fail <worker.name> <job_id>
-- tmux-orchestrator retry <job_id>
-
-Workers are named worker.* and must not communicate directly with each other. The router creates job_id and route_token values when you use send/broadcast. Prefer using the CLI commands instead of hand-writing protocol blocks.
-
-Workers are responsible for completing their own jobs by running tmux-orchestrator complete <job_id> --route-token <route_token> --status done --summary "...". The router marks that worker idle as soon as complete succeeds, even if other workers are still running.
-
-RESULT blocks are only a fallback for workers that cannot run shell commands. Use mark-done only as a manual fallback when a worker visibly finished but failed to call complete.
-
-After send or broadcast, use tmux-orchestrator wait <job_id-or-parent_job_id> --watch to wait for local SQLite state changes. Do not implement custom monitor loops in natural language.
-
-Check status and .tmux-orchestrator/logs/events.log when the human asks what is happening. Delegate only when it helps, summarize worker results clearly, and ask the human before taking broad or risky actions.
-
-When you use tmux-orchestrator send or broadcast, the router submits the task to the worker automatically. Do not operate worker panes manually unless you are diagnosing a stuck interface.
-
-Acknowledge briefly that you are ready to orchestrate, then wait for the human's next instruction.
-"""
-
-
 ANSI_RESET = "\033[0m"
 ANSI_BY_LEVEL: dict[EventLevel, str] = {
     "debug": "\033[2m",
@@ -1680,13 +1650,13 @@ def choose_orchestrator_command(option: str | None) -> tuple[str, ...]:
 
 def parse_orchestrator_option(option: str) -> tuple[str, ...]:
     if option == "codex":
-        return ("codex-yolo", "--no-alt-screen", ORCHESTRATOR_BOOTSTRAP_PROMPT)
+        return ("codex-yolo", "--no-alt-screen")
     if option == "claude":
-        return ("claude-yolo", ORCHESTRATOR_BOOTSTRAP_PROMPT)
+        return ("claude-yolo",)
     if option == "qwen":
-        return ("qwen-yolo", "--prompt-interactive", ORCHESTRATOR_BOOTSTRAP_PROMPT)
+        return ("qwen-yolo",)
     if option == "gemini":
-        return ("gemini-yolo", ORCHESTRATOR_BOOTSTRAP_PROMPT)
+        return ("gemini-yolo",)
     if option == "shell":
         return (os.environ.get("SHELL") or "/bin/bash",)
     if option.startswith("custom:"):

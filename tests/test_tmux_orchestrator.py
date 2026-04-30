@@ -426,26 +426,22 @@ RESULT
     def test_orchestrator_defaults_to_codex_without_prompt(self) -> None:
         command = orch.choose_orchestrator_command(None)
 
-        self.assertEqual(command[:2], ("codex-yolo", "--no-alt-screen"))
-        self.assertIn("tmux-orchestrator status", command[2])
+        self.assertEqual(command, ("codex-yolo", "--no-alt-screen"))
 
     def test_orchestrator_override_shell(self) -> None:
         self.assertTrue(orch.choose_orchestrator_command("shell")[0].endswith("sh"))
 
-    def test_orchestrator_override_claude_gets_bootstrap_prompt(self) -> None:
+    def test_orchestrator_override_claude_gets_no_prompt(self) -> None:
         command = orch.choose_orchestrator_command("claude")
 
-        self.assertEqual(command[0], "claude-yolo")
-        self.assertIn("human-facing orchestrator", command[1])
+        self.assertEqual(command, ("claude-yolo",))
 
-    def test_orchestrator_override_qwen_and_gemini_get_bootstrap_prompt(self) -> None:
+    def test_orchestrator_override_qwen_and_gemini_get_no_prompt(self) -> None:
         qwen_command = orch.choose_orchestrator_command("qwen")
         gemini_command = orch.choose_orchestrator_command("gemini")
 
-        self.assertEqual(qwen_command[:2], ("qwen-yolo", "--prompt-interactive"))
-        self.assertIn("human-facing orchestrator", qwen_command[2])
-        self.assertEqual(gemini_command[0], "gemini-yolo")
-        self.assertIn("human-facing orchestrator", gemini_command[1])
+        self.assertEqual(qwen_command, ("qwen-yolo",))
+        self.assertEqual(gemini_command, ("gemini-yolo",))
 
     def test_daemon_command_puts_global_state_dir_before_subcommand(self) -> None:
         command = orch.daemon_command_argv(pathlib.Path("/tmp/tmux-orch-test"))

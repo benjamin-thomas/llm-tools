@@ -1,0 +1,4 @@
+interface:
+  display_name: "Worker Orchestrator"
+  short_description: "Coordinate visible AI CLI workers"
+  default_prompt: "Use $worker-orchestrator to coordinate workers through the local orchestrator."
