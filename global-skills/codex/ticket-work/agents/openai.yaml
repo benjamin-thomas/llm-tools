@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ticket Work"
+  short_description: "Execute one ticket workflow"
+  default_prompt: "Use $ticket-work to pick up a ticket, confirm the plan, and move it to done."

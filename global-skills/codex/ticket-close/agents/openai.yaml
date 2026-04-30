@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ticket Close"
+  short_description: "Close human-reviewed tickets"
+  default_prompt: "Use $ticket-close to present an AI-reviewed ticket for approval and close it."

@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
+# Type checking:
+#   pyright --project pyrightconfig.json
+#
+# VS Code:
+#   Install/enable the Python extension and Pylance. Pylance reads
+#   pyrightconfig.json in this repository and checks this file when it is open.
+
 """Dictate — Push-to-Talk Speech-to-Text (X11).
 
 Hold Super+F5 to record, release to transcribe and paste.
-Supports multiple providers: groq (default), openai, mistral.
-Passes the previous transcription as prompt for better contextual accuracy.
+Supports multiple providers: groq, openai, mistral.
 
 NOTE: pynput uses XRecord (X11 extension) for global key listening. This won't
 work on Wayland. A future migration path: replace the keyboard listener with a
@@ -26,11 +32,14 @@ Usage:
     python3 dictate.py mistral      # use Mistral
 """
 
+from __future__ import annotations
+
 import io
 import math
 import os
 import pathlib
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -38,14 +47,19 @@ import tempfile
 import threading
 import time
 import wave
+from typing import Any, TypedDict
 
-_MISSING = []
+_MISSING: list[str] = []
+keyboard: Any = None
+requests: Any = None
 try:
-    from pynput import keyboard
+    from pynput import keyboard as _keyboard  # type: ignore[reportMissingModuleSource]
+    keyboard = _keyboard
 except ImportError:
     _MISSING.append('pynput (pip install pynput)')
 try:
-    import requests
+    import requests as _requests  # type: ignore[reportMissingModuleSource]
+    requests = _requests
 except ImportError:
     _MISSING.append('python3-requests')
 
@@ -64,24 +78,27 @@ if _MISSING:
 
 # --- Provider configuration ---------------------------------------------------
 
-PROVIDERS = {
+class ProviderConfig(TypedDict):
+    api_url: str
+    model: str
+    env_key: str
+
+
+PROVIDERS: dict[str, ProviderConfig] = {
     'groq': {
         'api_url': 'https://api.groq.com/openai/v1/audio/transcriptions',
-        'model': 'whisper-large-v3',
+        'model': 'whisper-large-v3-turbo',
         'env_key': 'GROQ_API_KEY',
-        'supports_prompt': True,
     },
     'openai': {
         'api_url': 'https://api.openai.com/v1/audio/transcriptions',
         'model': 'gpt-4o-mini-transcribe',
         'env_key': 'OPENAI_API_KEY',
-        'supports_prompt': True,
     },
     'mistral': {
         'api_url': 'https://api.mistral.ai/v1/audio/transcriptions',
         'model': 'voxtral-mini-latest',
         'env_key': 'MISTRAL_API_KEY',
-        'supports_prompt': False,
     },
 }
 
@@ -92,7 +109,6 @@ PROVIDER = sys.argv[1]
 _conf = PROVIDERS[PROVIDER]
 API_URL = _conf['api_url']
 MODEL = _conf['model']
-SUPPORTS_PROMPT = _conf['supports_prompt']
 API_KEY = os.environ.get(_conf['env_key'])
 if not API_KEY:
     sys.exit(f"ERROR: {_conf['env_key']} not set.\n  export {_conf['env_key']}='...'")
@@ -105,10 +121,7 @@ STATE_DIR = os.path.join(
 )
 
 DICTATING_FILE = os.path.join(STATE_DIR, 'dictating')
-TTS_SKIP_FILE = os.path.join(STATE_DIR, 'tts-skip')
-TTS_PREV_FILE = os.path.join(STATE_DIR, 'tts-prev')
-TTS_PAUSE_FILE = os.path.join(STATE_DIR, 'tts-pause')
-TTS_BACKEND_FILE = os.path.join(STATE_DIR, 'tts-backend')
+LAST_TRANSCRIPTION_FILE = os.path.join(STATE_DIR, 'last-transcription.txt')
 
 BEEP_START = os.path.join(STATE_DIR, 'beep-start.wav')
 BEEP_STOP = os.path.join(STATE_DIR, 'beep-stop.wav')
@@ -123,13 +136,13 @@ TERMINALS = frozenset({
 })
 
 
-def ensure_state_dir():
+def ensure_state_dir() -> None:
     os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
 
 
 # --- Audio feedback -----------------------------------------------------------
 
-def generate_wav(freq, duration=0.1, volume=0.15):
+def generate_wav(freq: float, duration: float = 0.1, volume: float = 0.15) -> bytes:
     n = int(SAMPLE_RATE * duration)
     samples = struct.pack(
         f'<{n}h',
@@ -145,7 +158,7 @@ def generate_wav(freq, duration=0.1, volume=0.15):
     return buf.getvalue()
 
 
-def ensure_beep_files():
+def ensure_beep_files() -> None:
     """Generate beep WAV files in STATE_DIR if they don't already exist."""
     for path, freq, duration in [
         (BEEP_START, 880, 0.1),
@@ -157,7 +170,7 @@ def ensure_beep_files():
                 f.write(generate_wav(freq, duration))
 
 
-def play_beep(path):
+def play_beep(path: str) -> None:
     threading.Thread(
         target=lambda: subprocess.run(['aplay', '-q', path], stderr=subprocess.DEVNULL),
         daemon=True,
@@ -166,7 +179,7 @@ def play_beep(path):
 
 # --- Window detection & paste -------------------------------------------------
 
-def is_terminal():
+def is_terminal() -> bool:
     try:
         wid = subprocess.check_output(
             ['xdotool', 'getactivewindow'], stderr=subprocess.DEVNULL
@@ -179,7 +192,7 @@ def is_terminal():
         return False
 
 
-def copy_and_paste(text):
+def copy_and_paste(text: str) -> None:
     # Strip control characters to prevent command injection in terminals
     text = ''.join(c for c in text if c >= ' ')
     subprocess.run(['xclip', '-selection', 'clipboard'], input=text.encode(), check=True)
@@ -190,54 +203,46 @@ def copy_and_paste(text):
 
 # --- Transcription ------------------------------------------------------------
 
-def transcribe(wav_path, prompt=''):
-    data = {'model': MODEL}
-    if prompt and SUPPORTS_PROMPT:
-        data['prompt'] = prompt
+def transcribe(wav_path: str) -> str:
     with open(wav_path, 'rb') as f:
         resp = requests.post(
             API_URL,
             headers={'Authorization': f'Bearer {API_KEY}'},
             files={'file': ('audio.wav', f, 'audio/wav')},
-            data=data,
+            data={'model': MODEL},
         )
     resp.raise_for_status()
-    return resp.json()['text'].strip()
+    payload: Any = resp.json()
+    return str(payload['text']).strip()
 
 
 # --- Main ---------------------------------------------------------------------
 
-def main():
+def main() -> None:
     ensure_state_dir()
     ensure_beep_files()
 
     print(f'Dictate ready!  [provider: {PROVIDER}, model: {MODEL}]')
     print('  Super+F5 = start recording (press again to restart)')
     print('  Super+F6 = stop & transcribe')
-    print('  Super+F7 = TTS skip to next paragraph')
-    print('  Super+Shift+F7 = TTS go to previous paragraph')
-    print('  Super+F8 = TTS pause/resume')
-    print('  Super+F9 = Toggle TTS backend (Piper/OpenAI)')
     print('  Press Ctrl+C to quit.')
     print()
 
     super_held = False
-    shift_held = False
     recording = False
-    arecord_proc = None
-    tmpfile = None
-    last_text = ''
+    arecord_proc: subprocess.Popen[bytes] | None = None
+    tmpfile: str | None = None
     lock = threading.Lock()
 
-    def stop_recording():
+    def stop_recording() -> None:
         nonlocal recording, arecord_proc
         if arecord_proc:
-            arecord_proc.send_signal(subprocess.signal.SIGINT)
+            arecord_proc.send_signal(signal.SIGINT)
             arecord_proc.wait()
             arecord_proc = None
         recording = False
 
-    def start_recording():
+    def start_recording() -> None:
         nonlocal recording, arecord_proc, tmpfile
         if recording:
             stop_recording()
@@ -258,19 +263,19 @@ def main():
         )
         print('[recording...]', end='', flush=True)
 
-    def stop_and_transcribe():
-        nonlocal tmpfile, last_text
+    def stop_and_transcribe() -> None:
+        nonlocal tmpfile
         stop_recording()
         play_beep(BEEP_STOP)
         try:
             if tmpfile and os.path.getsize(tmpfile) > 0:
                 print(' transcribing...', end='', flush=True)
-                text = transcribe(tmpfile, prompt=last_text)
+                text = transcribe(tmpfile)
                 if text:
                     print(f' "{text}"')
+                    pathlib.Path(LAST_TRANSCRIPTION_FILE).write_text(text, encoding='utf-8')
                     copy_and_paste(text)
                     play_beep(BEEP_READY)
-                    last_text = text
                 else:
                     print(' (empty)')
             else:
@@ -287,16 +292,12 @@ def main():
                 pass
 
     SUPER_KEYS = {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r}
-    SHIFT_KEYS = {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r}
 
-    def on_press(key):
-        nonlocal super_held, shift_held
+    def on_press(key: Any) -> None:
+        nonlocal super_held
         with lock:
             if key in SUPER_KEYS:
                 super_held = True
-                return
-            if key in SHIFT_KEYS:
-                shift_held = True
                 return
             if not super_held:
                 return
@@ -305,28 +306,11 @@ def main():
                 start_recording()
             elif key == keyboard.Key.f6 and recording:
                 stop_and_transcribe()
-            elif key == keyboard.Key.f7:
-                if shift_held:
-                    pathlib.Path(TTS_PREV_FILE).touch()
-                else:
-                    pathlib.Path(TTS_SKIP_FILE).touch()
-            elif key == keyboard.Key.f8:
-                pathlib.Path(TTS_PAUSE_FILE).touch()
-            elif key == keyboard.Key.f9:
-                try:
-                    current = pathlib.Path(TTS_BACKEND_FILE).read_text().strip()
-                except FileNotFoundError:
-                    current = 'piper'
-                new_backend = 'openai' if current == 'piper' else 'piper'
-                pathlib.Path(TTS_BACKEND_FILE).write_text(new_backend)
-                print(f'\n[TTS backend: {new_backend}]')
 
-    def on_release(key):
-        nonlocal super_held, shift_held
+    def on_release(key: Any) -> None:
+        nonlocal super_held
         if key in SUPER_KEYS:
             super_held = False
-        elif key in SHIFT_KEYS:
-            shift_held = False
 
     with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
         try:

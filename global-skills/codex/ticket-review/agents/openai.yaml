@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ticket Review"
+  short_description: "Review completed ticket work"
+  default_prompt: "Use $ticket-review to verify a done ticket against its acceptance criteria."

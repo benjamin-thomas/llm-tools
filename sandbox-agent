@@ -26,6 +26,19 @@ parser = OptionParser.new do |opts|
   opts.separator "Examples:"
   opts.separator "  sandbox-agent . -- pi"
   opts.separator "  sandbox-agent /path/to/project -- pi -p 'fix the bug'"
+  opts.separator ""
+  opts.separator "Low-intervention \"yolo\" wrappers (see ~/.local/bin/*-yolo):"
+  opts.separator "  sandbox-agent . -- claude-yolo"
+  opts.separator "  sandbox-agent . -- gemini-yolo"
+  opts.separator "  sandbox-agent . -- qwen-yolo"
+  opts.separator "  sandbox-agent . -- codex-yolo"
+  opts.separator "  sandbox-agent . -- opencode       # already yolo by default"
+  opts.separator "  sandbox-agent . -- pi             # already yolo by default"
+  opts.separator ""
+  opts.separator "Projects can provide a .sandbox-mounts file for extra mounts:"
+  opts.separator "  ro:/path          — read-only mount"
+  opts.separator "  rw:/path          — read-write mount"
+  opts.separator "  path:/path/bin    — add to PATH"
 end
 
 parser.order!
@@ -47,43 +60,123 @@ def require_file!(path, label)
   abort "#{label} not found: #{path}" unless File.exist?(path)
 end
 
+def find_command_path(command, path_dirs)
+  return nil if command.nil? || command.empty?
+
+  if command.include?("/")
+    expanded = File.expand_path(command)
+    return expanded if File.exist?(expanded) || File.symlink?(expanded)
+    return nil
+  end
+
+  path_dirs.each do |dir|
+    candidate = File.join(dir, command)
+    return candidate if File.exist?(candidate) || File.symlink?(candidate)
+  end
+
+  nil
+end
+
+def bind_command_symlink_target!(args, command, path_dirs)
+  command_path = find_command_path(command, path_dirs)
+  return unless command_path && File.symlink?(command_path)
+
+  target = File.realpath(command_path)
+  mount_path = File.directory?(target) ? target : File.dirname(target)
+  return unless File.directory?(mount_path)
+
+  warn "Binding command symlink target: #{mount_path}"
+  args.push(*ro(mount_path))
+end
+
 # --- detect paths ---
 
-home     = ENV.fetch("HOME")
-nvm_dir  = ENV.fetch("NVM_DIR", "#{home}/.nvm")
-node_bin = File.dirname(`which node`.chomp)
-term     = ENV.fetch("TERM", "xterm-256color")
+home = ENV.fetch("HOME")
+term = ENV.fetch("TERM", "xterm-256color")
 
+nvm_bin        = ENV["NVM_BIN"] || `bash -c 'source #{home}/.nvm/nvm.sh 2>/dev/null && echo -n "$NVM_BIN"'`
+nvm_bin        = nil if nvm_bin.empty?
 gitconfig      = "#{home}/.gitconfig"
 password_store = "#{home}/.password-store"
 gnupg_dir      = "#{home}/.gnupg"
 gpg_agent_dir  = "/run/user/#{Process.uid}/gnupg"
-resolvconf_dir = "/run/resolvconf"
+resolvconf_dir =
+  if    Dir.exist?("/run/resolvconf")       then "/run/resolvconf"
+  elsif Dir.exist?("/run/systemd/resolve")  then "/run/systemd/resolve"
+  else  abort "Cannot find DNS resolver directory (/run/resolvconf or /run/systemd/resolve)"
+  end
 
 # --- validate required paths ---
 
 require_dir!  project_dir,    "Project directory"
-require_dir!  nvm_dir,        "NVM directory"
 require_file! gitconfig,      "Git config"
 require_dir!  password_store, "Password store (~/.password-store)"
 require_dir!  gnupg_dir,      "GnuPG directory (~/.gnupg)"
 require_dir!  gpg_agent_dir,  "GPG agent socket dir"
-require_dir!  resolvconf_dir, "DNS resolver (/run/resolvconf)"
+require_dir!  resolvconf_dir, "DNS resolver"
 
 # --- build bwrap args ---
 
 args = []
 
+# System directories (read-only)
 args.push(*ro("/usr"), *ro("/lib"), *ro("/lib64"),
           *ro("/bin"), *ro("/sbin"), *ro("/etc"))
 args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp")
 
+# X11 clipboard access
+x11_socket = "/tmp/.X11-unix"
+args.push(*ro(x11_socket)) if File.directory?(x11_socket)
+
+# IDE connection sockets
+claude_ipc = "/tmp/claude-#{Process.uid}"
+args.push(*rw(claude_ipc)) if File.directory?(claude_ipc)
+
+# DNS
 args.push(*ro(resolvconf_dir))
 
+# Audio devices (for speech/dictation)
+snd_dir = "/dev/snd"
+args.push(*ro(snd_dir)) if File.directory?(snd_dir)
+
+# PulseAudio / PipeWire sockets
+pulse_dir       = "/run/user/#{Process.uid}/pulse"
+pipewire_socket = "/run/user/#{Process.uid}/pipewire-0"
+args.push(*ro(pulse_dir))       if File.directory?(pulse_dir)
+args.push(*ro(pipewire_socket)) if File.exist?(pipewire_socket)
+
+# D-Bus + keyring (agent auth: Gemini, etc.)
+dbus_socket = "/run/user/#{Process.uid}/bus"
+keyring_dir = "/run/user/#{Process.uid}/keyring"
+args.push(*ro(dbus_socket))  if File.exist?(dbus_socket)
+args.push(*ro(keyring_dir))  if File.directory?(keyring_dir)
+
+# Home: tmpfs overlay, then selective mounts
 args.push("--tmpfs", home)
-args.push(*ro(nvm_dir))
 args.push(*ro(gitconfig))
 args.push(*rw("#{home}/.pi"))
+
+# Agent config/data directories
+local_dir = "#{home}/.local"
+claude_dir = "#{home}/.claude"
+gemini_dir = "#{home}/.gemini"
+qwen_dir   = "#{home}/.qwen"
+claude_json = "#{home}/.claude.json"
+codex_dir   = "#{home}/.codex"
+args.push(*ro(local_dir))    if File.directory?(local_dir)
+args.push(*rw(claude_dir))   if File.directory?(claude_dir)
+args.push(*rw(claude_json))  if File.exist?(claude_json)
+args.push(*rw(codex_dir))    if File.directory?(codex_dir)
+args.push(*rw(gemini_dir))   if File.directory?(gemini_dir)
+args.push(*rw(qwen_dir))     if File.directory?(qwen_dir)
+opencode_cfg = "#{home}/.config/opencode"
+opencode_data = "#{home}/.local/share/opencode"
+args.push(*rw(opencode_cfg))  if File.directory?(opencode_cfg)
+args.push(*rw(opencode_data)) if File.directory?(opencode_data)
+cache_dir = "#{home}/.cache"
+args.push(*rw(cache_dir))    if File.directory?(cache_dir)
+pictures_dir = "#{home}/Pictures"
+args.push(*ro(pictures_dir)) if File.directory?(pictures_dir)
 args.push(*rw(project_dir))
 
 # Bind-mount symlink targets so relative symlinks work
@@ -104,18 +197,60 @@ Dir.children(project_dir).each do |name|
   end
 end
 
+# nvm (current Node version)
+if nvm_bin
+  nvm_node_dir = File.dirname(nvm_bin) # e.g. .nvm/versions/node/v22.19.0
+  args.push(*ro(nvm_node_dir)) if File.directory?(nvm_node_dir)
+end
+
 args.push(*ro(password_store), *ro(gnupg_dir), *ro(gpg_agent_dir))
 
 if !flags[:rw_git] && File.directory?("#{project_dir}/.git")
   args.push(*ro("#{project_dir}/.git"))
 end
 
+# --- Project-specific extra mounts (.sandbox-mounts) ---
+extra_path_dirs = []
+sandbox_mounts = File.join(project_dir, ".sandbox-mounts")
+if File.exist?(sandbox_mounts)
+  File.readlines(sandbox_mounts).each do |line|
+    line = line.strip
+    next if line.empty? || line.start_with?("#")
+    mode, path = line.split(":", 2)
+    path = File.expand_path(path)
+    case mode
+    when "ro"   then args.push(*ro(path)) if File.exist?(path)
+    when "rw"   then args.push(*rw(path)) if File.exist?(path)
+    when "path" then extra_path_dirs << path
+    else warn "Unknown mount mode '#{mode}' in .sandbox-mounts: #{line}"
+    end
+  end
+end
+
 args.push("--unshare-pid", "--die-with-parent", "--chdir", project_dir)
+
+colorterm = ENV.fetch("COLORTERM", "truecolor")
+lang      = ENV.fetch("LANG", "en_US.UTF-8")
+
+path_dirs = [
+  "#{home}/.local/bin",
+  *extra_path_dirs,
+  *(nvm_bin ? [nvm_bin] : []),
+  "/usr/local/bin", "/usr/bin", "/bin",
+].compact
+
+bind_command_symlink_target!(args, cmd.first, path_dirs)
 
 args.push("--clearenv",
           "--setenv", "HOME", home,
-          "--setenv", "PATH", "#{node_bin}:/usr/local/bin:/usr/bin:/bin",
-          "--setenv", "TERM", term)
+          "--setenv", "PATH", path_dirs.join(":"),
+          "--setenv", "TERM", term,
+          "--setenv", "COLORTERM", colorterm,
+          "--setenv", "LANG", lang,
+          *(ENV["DISPLAY"] ? ["--setenv", "DISPLAY", ENV["DISPLAY"]] : []),
+          *(ENV["DBUS_SESSION_BUS_ADDRESS"] ? ["--setenv", "DBUS_SESSION_BUS_ADDRESS", ENV["DBUS_SESSION_BUS_ADDRESS"]] : []),
+          *(ENV["DISABLE_AUTO_COMPACT"] ? ["--setenv", "DISABLE_AUTO_COMPACT", "1"] : []),
+          *(ENV["XDG_RUNTIME_DIR"] ? ["--setenv", "XDG_RUNTIME_DIR", ENV["XDG_RUNTIME_DIR"]] : []))
 
 # --- sandboxed tmux server ---
 
@@ -130,10 +265,13 @@ warn "---"
 
 cmd = [
   "tmux", "-f", "/dev/null",
+  "set", "-g", "default-terminal", "tmux-256color", ";",
   "set", "-g", "prefix", "C-o", ";",
+  "bind", "C-o", "send-prefix", ";",
   "bind", "-n", "M-left", "prev", ";",
   "bind", "-n", "M-right", "next", ";",
-  "new-session", "-s", "sandbox", cmd.shelljoin,
+  "new-session", "-s", "sandbox", ";",
+  "send-keys", cmd.shelljoin, "Enter",
 ]
 
 args.push("--", *cmd)

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ticket Create"
+  short_description: "Create scoped ticket specs"
+  default_prompt: "Use $ticket-create to interview me and draft _tickets/todo specs for this work."

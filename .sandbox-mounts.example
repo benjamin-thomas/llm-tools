@@ -1,0 +1,27 @@
+# Project-specific extra mounts for sandbox-agent
+# Place as .sandbox-mounts at your project root
+#
+# Formats:
+#   ro:/path          — read-only mount
+#   rw:/path          — read-write mount
+#   path:/path/bin    — add to PATH
+#
+# Paths starting with ~ are expanded to $HOME.
+# Lines starting with # are comments. Blank lines are ignored.
+# Non-existent paths are silently skipped.
+
+# Example: Ruby project with rbenv
+# rw:~/.rbenv
+# rw:~/.bundle
+# path:~/.rbenv/shims
+# path:~/.rbenv/bin
+
+# Example: Node.js project with nvm
+# ro:~/.nvm
+# path:~/.nvm/versions/node/v22.19.0/bin
+
+# Example: app secrets
+# ro:/run/myapp
+
+# Example: system binary not in /usr
+# ro:/opt/google/chrome

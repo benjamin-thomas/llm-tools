@@ -1,0 +1,4 @@
+interface:
+  display_name: "Knowledge Verify"
+  short_description: "Check knowledge for drift"
+  default_prompt: "Use $knowledge-verify to verify _knowledge against the codebase and propose fixes one finding at a time."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Knowledge Condense"
+  short_description: "Capture session learnings"
+  default_prompt: "Use $knowledge-condense to capture the durable learnings from this session into _knowledge."
