@@ -19,25 +19,20 @@ class FakeTransport:
     styled: list[str]
     notifications: list[str]
     fail_submit: bool = False
-    submit_delays: list[float] = field(default_factory=list[float])
-    submit_enter_counts: list[int] = field(default_factory=list[int])
+    typed: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
 
     def paste_text(self, pane_id: str, text: str) -> None:
         self.pasted.append((pane_id, text))
 
-    def submit_text(
-        self,
-        pane_id: str,
-        text: str,
-        *,
-        enter_delay_seconds: float = orch.DEFAULT_SUBMIT_ENTER_DELAY_SECONDS,
-        enter_count: int = orch.DEFAULT_SUBMIT_ENTER_COUNT,
-    ) -> None:
+    def submit_text(self, pane_id: str, text: str) -> None:
         self.submitted.append((pane_id, text))
-        self.submit_delays.append(enter_delay_seconds)
-        self.submit_enter_counts.append(enter_count)
         if self.fail_submit:
             raise orch.TmuxError("enter failed")
+
+    def submit_text_via_typing(self, pane_id: str, text: str) -> None:
+        self.typed.append((pane_id, text))
+        if self.fail_submit:
+            raise orch.TmuxError("typing failed")
 
     def style_worker(self, worker: orch.WorkerRecord) -> None:
         self.styled.append(worker.name)
@@ -103,10 +98,9 @@ RESULT
 
         orch.dispatch_queued_jobs(store, fake)
 
-        self.assertEqual(len(fake.submitted), 1)
-        self.assertIn("job_id: job_queued", fake.submitted[0][1])
-        self.assertEqual(fake.submit_delays, [orch.CODEX_SUBMIT_ENTER_DELAY_SECONDS])
-        self.assertEqual(fake.submit_enter_counts, [orch.CODEX_SUBMIT_ENTER_COUNT])
+        self.assertEqual(fake.submitted, [])
+        self.assertEqual(len(fake.typed), 1)
+        self.assertIn("job_id: job_queued", fake.typed[0][1])
         updated_worker = store.get_worker(worker.name)
         job = store.get_job("job_queued")
         assert updated_worker is not None
@@ -127,7 +121,8 @@ RESULT
         orch.dispatch_queued_jobs(store, fake)
         orch.dispatch_queued_jobs(store, fake)
 
-        self.assertEqual(len(fake.submitted), 1)
+        self.assertEqual(fake.submitted, [])
+        self.assertEqual(len(fake.typed), 1)
         updated_worker = store.get_worker(worker.name)
         job = store.get_job("job_queued")
         assert updated_worker is not None
@@ -464,13 +459,21 @@ RESULT
 
         self.assertEqual(codex_worker.command, ("codex-yolo", "--no-alt-screen"))
 
-    def test_codex_worker_uses_longer_submit_delay(self) -> None:
-        self.assertEqual(orch.submit_delay_for_worker("worker.codex"), orch.CODEX_SUBMIT_ENTER_DELAY_SECONDS)
-        self.assertEqual(orch.submit_delay_for_worker("worker.claude"), orch.DEFAULT_SUBMIT_ENTER_DELAY_SECONDS)
+    def test_codex_worker_uses_typing_submit_path(self) -> None:
+        tmp, store = self.make_store()
+        self.addCleanup(tmp.cleanup)
+        codex = self.add_idle_worker(store, "worker.codex")
+        claude = self.add_idle_worker(store, "worker.claude")
+        store.create_job(worker_name=codex.name, body="x", kind="task", job_id="job_codex", route_token="rt_c")
+        store.create_job(worker_name=claude.name, body="x", kind="task", job_id="job_claude", route_token="rt_a")
+        fake = FakeTransport([], [], [], [])
 
-    def test_codex_worker_gets_two_submit_enters(self) -> None:
-        self.assertEqual(orch.submit_enter_count_for_worker("worker.codex"), orch.CODEX_SUBMIT_ENTER_COUNT)
-        self.assertEqual(orch.submit_enter_count_for_worker("worker.claude"), orch.DEFAULT_SUBMIT_ENTER_COUNT)
+        orch.dispatch_queued_jobs(store, fake)
+
+        self.assertEqual(len(fake.typed), 1)
+        self.assertIn("job_id: job_codex", fake.typed[0][1])
+        self.assertEqual(len(fake.submitted), 1)
+        self.assertIn("job_id: job_claude", fake.submitted[0][1])
 
     def test_default_worker_window_names_follow_worker_convention(self) -> None:
         window_names = [worker.window_name for worker in orch.DEFAULT_WORKERS]

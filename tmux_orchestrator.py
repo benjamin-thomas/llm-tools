@@ -31,10 +31,11 @@ APP_DIR_NAME = ".tmux-orchestrator"
 DEFAULT_STATE_DIR = pathlib.Path(APP_DIR_NAME)
 DEFAULT_POLL_INTERVAL_SECONDS = 1.0
 DEFAULT_SUBMIT_ENTER_DELAY_SECONDS = 0.35
-CODEX_SUBMIT_ENTER_DELAY_SECONDS = 1.00
-DEFAULT_SUBMIT_ENTER_COUNT = 1
-CODEX_SUBMIT_ENTER_COUNT = 2
-CODEX_SUBMIT_EXTRA_ENTER_DELAY_SECONDS = 0.75
+# Codex (Ratatui TUI) suppresses Enter as submit during a 120 ms window after
+# a burst of rapid key input — see PASTE_ENTER_SUPPRESS_WINDOW in
+# codex-rs/tui/src/bottom_pane/paste_burst.rs of openai/codex. We pause for
+# twice that (240 ms) before the final Enter so it is treated as submit.
+CODEX_PASTE_BURST_FLUSH_SECONDS = 0.24
 PROTOCOL_VERSION = "tmux-orchestrator/v1"
 
 WorkerStateValue = Literal["idle", "busy", "waiting_input", "failed", "protocol_error"]
@@ -74,8 +75,6 @@ class WorkerSpec:
     name: str
     window_name: str
     command: tuple[str, ...]
-    submit_delay_seconds: float = DEFAULT_SUBMIT_ENTER_DELAY_SECONDS
-    submit_enter_count: int = DEFAULT_SUBMIT_ENTER_COUNT
 
 
 @dataclass(frozen=True)
@@ -164,14 +163,10 @@ class Transport(Protocol):
     def paste_text(self, pane_id: str, text: str) -> None:
         ...
 
-    def submit_text(
-        self,
-        pane_id: str,
-        text: str,
-        *,
-        enter_delay_seconds: float = DEFAULT_SUBMIT_ENTER_DELAY_SECONDS,
-        enter_count: int = DEFAULT_SUBMIT_ENTER_COUNT,
-    ) -> None:
+    def submit_text(self, pane_id: str, text: str) -> None:
+        ...
+
+    def submit_text_via_typing(self, pane_id: str, text: str) -> None:
         ...
 
     def style_worker(self, worker: WorkerRecord) -> None:
@@ -183,24 +178,12 @@ class Transport(Protocol):
 
 DEFAULT_WORKERS: tuple[WorkerSpec, ...] = (
     WorkerSpec("worker.claude", "worker.claude", ("claude-yolo",)),
-    WorkerSpec(
-        "worker.codex",
-        "worker.codex",
-        ("codex-yolo", "--no-alt-screen"),
-        CODEX_SUBMIT_ENTER_DELAY_SECONDS,
-        CODEX_SUBMIT_ENTER_COUNT,
-    ),
+    WorkerSpec("worker.codex", "worker.codex", ("codex-yolo", "--no-alt-screen")),
     WorkerSpec("worker.qwen", "worker.qwen", ("qwen-yolo",)),
     WorkerSpec("worker.gemini", "worker.gemini", ("gemini-yolo",)),
 )
 
-DEFAULT_WORKER_SUBMIT_DELAY_BY_NAME: dict[str, float] = {
-    spec.name: spec.submit_delay_seconds for spec in DEFAULT_WORKERS
-}
-
-DEFAULT_WORKER_SUBMIT_ENTER_COUNT_BY_NAME: dict[str, int] = {
-    spec.name: spec.submit_enter_count for spec in DEFAULT_WORKERS
-}
+CODEX_WORKER_NAME = "worker.codex"
 
 DEPRECATED_SHORT_WORKER_WINDOW_NAMES: tuple[str, ...] = ("claude", "codex", "qwen", "gemini")
 
@@ -904,10 +887,17 @@ class Tmux:
         *,
         logical_name: str | None = None,
         target_index: int | None = None,
+        cwd: pathlib.Path | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         args: list[str] = ["new-window"]
         if target_index is not None:
             args.extend(("-t", f":{target_index}"))
+        if cwd is not None:
+            args.extend(("-c", str(cwd)))
+        if env:
+            for key, value in env.items():
+                args.extend(("-e", f"{key}={value}"))
         args.extend(("-n", window_name, command))
         self.run(tuple(args))
         title = logical_name or window_name
@@ -958,7 +948,14 @@ class Tmux:
         self.run(("select-window", "-t", f"{pane.session_name}:{pane.window_index}"), check=False)
         self.run(("select-pane", "-t", pane.pane_id), check=False)
 
-    def ensure_default_worker_windows(self) -> None:
+    def ensure_default_worker_windows(self, *, cd_workers: bool = False) -> None:
+        if cd_workers:
+            state_dir_abs = self.state_dir.resolve()
+            workers_root = state_dir_abs.parent
+            worker_env: Mapping[str, str] | None = {"TMUX_ORCHESTRATOR_STATE_DIR": str(state_dir_abs)}
+        else:
+            workers_root = None
+            worker_env = None
         for spec in DEFAULT_WORKERS:
             existing = self.find_default_worker_pane(spec)
             if existing is not None:
@@ -967,15 +964,29 @@ class Tmux:
                     self.run(("rename-window", "-t", target, spec.window_name), check=False)
                 self.run(("select-pane", "-t", existing.pane_id, "-T", spec.name), check=False)
                 continue
+            cwd: pathlib.Path | None = None
+            if workers_root is not None:
+                short = spec.name.removeprefix("worker.")
+                worker_dir = workers_root / f"worker-{short}"
+                if not worker_dir.exists():
+                    worker_dir.mkdir(parents=True)
+                    self.store.event("info", f"created worker dir {worker_dir}", worker=spec.name)
+                cwd = worker_dir
             command_name = spec.command[0]
             if shutil.which(command_name) is None:
                 error = f"missing wrapper {command_name}; worker cannot start"
                 self.store.ensure_missing_default_worker_failed(spec, error)
                 message = f"tmux-orchestrator: {error}"
                 shell_command = f"printf '%s\\n' {shlex.quote(message)}; exec ${{SHELL:-/bin/bash}}"
-                self.create_window(spec.window_name, shell_command, logical_name=spec.name)
+                self.create_window(spec.window_name, shell_command, logical_name=spec.name, cwd=cwd, env=worker_env)
                 continue
-            self.create_window(spec.window_name, "exec " + shlex.join(spec.command), logical_name=spec.name)
+            self.create_window(
+                spec.window_name,
+                "exec " + shlex.join(spec.command),
+                logical_name=spec.name,
+                cwd=cwd,
+                env=worker_env,
+            )
             self.store.event("info", "created default worker", worker=spec.name)
 
     def pipe_pane_to_log(self, pane: PaneInfo, logical_name: str) -> pathlib.Path:
@@ -1034,20 +1045,27 @@ class Tmux:
         self.run(("load-buffer", "-b", buffer_name, "-"), stdin_text=text)
         self.run(("paste-buffer", "-b", buffer_name, "-t", pane_id, "-d"))
 
-    def submit_text(
-        self,
-        pane_id: str,
-        text: str,
-        *,
-        enter_delay_seconds: float = DEFAULT_SUBMIT_ENTER_DELAY_SECONDS,
-        enter_count: int = DEFAULT_SUBMIT_ENTER_COUNT,
-    ) -> None:
+    def submit_text(self, pane_id: str, text: str) -> None:
         self.paste_text(pane_id, text)
-        time.sleep(enter_delay_seconds)
-        for enter_index in range(max(1, enter_count)):
-            if enter_index > 0:
-                time.sleep(CODEX_SUBMIT_EXTRA_ENTER_DELAY_SECONDS)
-            self.run(("send-keys", "-t", pane_id, "C-m"))
+        time.sleep(DEFAULT_SUBMIT_ENTER_DELAY_SECONDS)
+        self.run(("send-keys", "-t", pane_id, "Enter"))
+
+    def submit_text_via_typing(self, pane_id: str, text: str) -> None:
+        # Codex's Ratatui composer treats fast bulk input as a paste burst and,
+        # for ~120 ms after the burst, swallows Enter as a newline-in-input
+        # rather than a submit. Sending via paste-buffer also routes through
+        # tmux's bracketed-paste path which Codex flags the same way. We bypass
+        # both by typing the text literally line by line (newlines become C-j
+        # so they stay inside the input box), then waiting past the suppression
+        # window before the final Enter.
+        lines = text.split("\n")
+        last_index = len(lines) - 1
+        for index, line in enumerate(lines):
+            self.run(("send-keys", "-t", pane_id, "-l", line))
+            if index != last_index:
+                self.run(("send-keys", "-t", pane_id, "C-j"))
+        time.sleep(CODEX_PASTE_BURST_FLUSH_SECONDS)
+        self.run(("send-keys", "-t", pane_id, "Enter"))
 
     def style_worker(self, worker: WorkerRecord) -> None:
         if worker.pane_id is None:
@@ -1136,14 +1154,6 @@ def block_hash(logical_name: str, block: MessageBlock) -> str:
     return digest.hexdigest()
 
 
-def submit_delay_for_worker(worker_name: str) -> float:
-    return DEFAULT_WORKER_SUBMIT_DELAY_BY_NAME.get(worker_name, DEFAULT_SUBMIT_ENTER_DELAY_SECONDS)
-
-
-def submit_enter_count_for_worker(worker_name: str) -> int:
-    return DEFAULT_WORKER_SUBMIT_ENTER_COUNT_BY_NAME.get(worker_name, DEFAULT_SUBMIT_ENTER_COUNT)
-
-
 def render_worker_prompt(job: JobRecord) -> str:
     task_block = textwrap.dedent(
         f"""\
@@ -1206,12 +1216,10 @@ def dispatch_queued_jobs(store: Store, transport: Transport) -> None:
         if updated is not None:
             transport.style_worker(updated)
         try:
-            transport.submit_text(
-                worker.pane_id,
-                payload,
-                enter_delay_seconds=submit_delay_for_worker(worker.name),
-                enter_count=submit_enter_count_for_worker(worker.name),
-            )
+            if worker.name == CODEX_WORKER_NAME:
+                transport.submit_text_via_typing(worker.pane_id, payload)
+            else:
+                transport.submit_text(worker.pane_id, payload)
         except TmuxError as exc:
             message = f"dispatch submit failed: {exc}"
             store.set_job_state(job.job_id, JobState.FAILED, error=message)
@@ -1676,7 +1684,7 @@ def exec_orchestrator(command: Sequence[str]) -> None:
     os.execvp(executable, [executable, *command[1:]])
 
 
-def run_setup_and_exec(state_dir: pathlib.Path, orchestrator_option: str | None) -> int:
+def run_setup_and_exec(state_dir: pathlib.Path, orchestrator_option: str | None, *, cd_workers: bool = False) -> int:
     ensure_state_dirs(state_dir)
     store = Store(state_dir)
     store.init_schema()
@@ -1687,7 +1695,7 @@ def run_setup_and_exec(state_dir: pathlib.Path, orchestrator_option: str | None)
     tmux.configure_session()
     tmux.rename_current_to_orchestrator()
     tmux.cleanup_bootstrap_windows()
-    tmux.ensure_default_worker_windows()
+    tmux.ensure_default_worker_windows(cd_workers=cd_workers)
     tmux.discover()
     start_daemon_if_needed(state_dir)
     tmux.select_logical_pane("orchestrator")
@@ -1722,12 +1730,12 @@ def print_status(store: Store) -> None:
         )
 
 
-def init_command(state_dir: pathlib.Path) -> int:
+def init_command(state_dir: pathlib.Path, *, cd_workers: bool = False) -> int:
     store = Store(state_dir)
     store.init_schema()
     tmux = Tmux(state_dir, store)
     tmux.configure_session()
-    tmux.ensure_default_worker_windows()
+    tmux.ensure_default_worker_windows(cd_workers=cd_workers)
     tmux.discover()
     dispatch_queued_jobs(store, tmux)
     store.event("info", "init complete")
@@ -1829,7 +1837,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=textwrap.dedent(
             """\
             Typical launch:
-              sandbox-agent . -- tmux-orchestrator run
+              sandbox-agent . -- tmux-orchestrator run                # workers share the project sandbox
+              sandbox-agent . -- tmux-orchestrator run --cd-workers   # each worker isolated in sibling worker-<name>/
 
             Orchestrator choices:
               tmux-orchestrator run                         # Codex orchestrator (default)
@@ -1839,6 +1848,12 @@ def build_parser() -> argparse.ArgumentParser:
               tmux-orchestrator run --orchestrator gemini   # Gemini orchestrator
               tmux-orchestrator run --orchestrator shell    # shell-only smoke/debug mode
               tmux-orchestrator run --orchestrator 'custom:my-cli --flag'
+
+            Worker isolation:
+              tmux-orchestrator run --cd-workers            # each worker starts in sibling worker-<name>/
+              tmux-orchestrator init --cd-workers           # same, for init-only flow
+              # Project root is the parent of --state-dir; TMUX_ORCHESTRATOR_STATE_DIR
+              # is injected so workers reach the parent state-dir.
 
             Common workflow inside the orchestrator pane:
               tmux-orchestrator status
@@ -1861,7 +1876,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("init", help="configure tmux, create default workers, discover panes, and dispatch queued jobs")
+    init_parser = subparsers.add_parser(
+        "init",
+        help="configure tmux, create default workers, discover panes, and dispatch queued jobs",
+    )
+    init_parser.add_argument(
+        "--cd-workers",
+        action="store_true",
+        help="start each worker pane in a sibling worker-<name>/ directory (project root = parent of --state-dir); "
+        "also injects TMUX_ORCHESTRATOR_STATE_DIR so workers reach the parent state-dir",
+    )
     subparsers.add_parser("discover", help="discover panes named worker.* and update router state")
     subparsers.add_parser("status", help="print workers and jobs from SQLite state")
 
@@ -1927,6 +1951,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="codex, claude, qwen, gemini, shell, or custom:<cmd>; default: codex",
     )
+    run_parser.add_argument(
+        "--cd-workers",
+        action="store_true",
+        help="start each worker pane in a sibling worker-<name>/ directory (project root = parent of --state-dir); "
+        "also injects TMUX_ORCHESTRATOR_STATE_DIR so workers reach the parent state-dir",
+    )
 
     daemon_parser = subparsers.add_parser("daemon", help="internal router loop; normally started by run")
     daemon_parser.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL_SECONDS)
@@ -1961,11 +1991,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    state_dir = pathlib.Path(cast(str, args.state_dir))
+    state_dir_arg = cast(str, args.state_dir)
+    env_state_dir = os.environ.get("TMUX_ORCHESTRATOR_STATE_DIR")
+    if env_state_dir and state_dir_arg == str(default_state_dir()):
+        state_dir = pathlib.Path(env_state_dir)
+    else:
+        state_dir = pathlib.Path(state_dir_arg)
     command = cast(str, args.command)
     try:
         if command == "init":
-            return init_command(state_dir)
+            return init_command(state_dir, cd_workers=cast(bool, args.cd_workers))
         if command == "discover":
             return discover_command(state_dir)
         if command == "status":
@@ -1988,7 +2023,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 watch=cast(bool, args.watch),
             )
         if command == "run":
-            return run_setup_and_exec(state_dir, cast(str | None, args.orchestrator))
+            return run_setup_and_exec(
+                state_dir,
+                cast(str | None, args.orchestrator),
+                cd_workers=cast(bool, args.cd_workers),
+            )
         if command == "daemon":
             return run_daemon(state_dir, cast(float, args.poll_interval))
         if command == "mark-done":
