@@ -177,6 +177,12 @@ opencode_cfg = "#{home}/.config/opencode"
 opencode_data = "#{home}/.local/share/opencode"
 args.push(*rw(opencode_cfg))  if File.directory?(opencode_cfg)
 args.push(*rw(opencode_data)) if File.directory?(opencode_data)
+
+# Skills under ~/.claude/skills, ~/.codex/skills, ~/.pi/agent/prompts, etc.
+# are symlinks into this repo (see llm-tools/global-skills + `llm-skills import`).
+# Without this mount, those symlinks dangle inside the sandbox and no skill loads.
+global_skills = "#{home}/code/github.com/benjamin-thomas/llm-tools/global-skills"
+args.push(*ro(global_skills)) if File.directory?(global_skills)
 cache_dir = "#{home}/.cache"
 args.push(*rw(cache_dir))    if File.directory?(cache_dir)
 pictures_dir = "#{home}/Pictures"
