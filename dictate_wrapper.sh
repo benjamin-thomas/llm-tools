@@ -10,4 +10,4 @@ case "$PROVIDER" in
     *)       echo "Unknown provider: $PROVIDER" >&2; exit 1 ;;
 esac
 
-exec python3 "$SCRIPT_DIR/dictate.py" "$PROVIDER"
+exec /usr/bin/python3 "$SCRIPT_DIR/dictate.py" "$PROVIDER"

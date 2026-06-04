@@ -9,6 +9,39 @@ require "tmpdir"
 
 flags = { rw_git: false }
 
+def detect_opam_switch
+  config = File.expand_path("~/.opam/config")
+  return nil unless File.exist?(config)
+  match = File.read(config).match(/^switch:\s*"([^"]+)"/)
+  match && match[1]
+end
+
+# Locate a Chrome/Chromium install on the host so projects driving a browser
+# via CDP (e.g. puppeteer-core, playwright in connect mode) don't each need
+# to declare `ro:/opt/google/chrome` in `.sandbox-mounts`. Returns the install
+# dir to mount, or nil if no system Chrome/Chromium is found.
+def detect_chrome_install_dir
+  candidates = [
+    "/opt/google/chrome/google-chrome",
+    "/opt/google/chrome-stable/google-chrome",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/snap/bin/chromium",
+  ]
+  candidates.each do |bin|
+    next unless File.exist?(bin) || File.symlink?(bin)
+    target = File.realpath(bin) rescue bin
+    dir = File.dirname(target)
+    return dir if File.directory?(dir)
+  end
+  nil
+end
+
+opam_switch = detect_opam_switch
+opam_path_line = opam_switch ? "path:~/.opam/#{opam_switch}/bin" : "path:~/.opam/<switch>/bin   # e.g. ~/.opam/5.3.0/bin"
+
 parser = OptionParser.new do |opts|
   opts.banner = "Usage: sandbox-agent [flags] <project-dir> -- <command...>"
   opts.separator ""
@@ -39,10 +72,56 @@ parser = OptionParser.new do |opts|
   opts.separator "  sandbox-agent . -- opencode       # already yolo by default"
   opts.separator "  sandbox-agent . -- pi             # already yolo by default"
   opts.separator ""
+  opts.separator "Auto-mounted when present on the host (no .sandbox-mounts needed):"
+  opts.separator "  Chrome/Chromium install dir — for projects driving a CDP browser"
+  opts.separator "  /dev/shm tmpfs              — required by Chrome and many tools"
+  opts.separator ""
   opts.separator "Projects can provide a .sandbox-mounts file for extra mounts:"
   opts.separator "  ro:/path          — read-only mount"
   opts.separator "  rw:/path          — read-write mount"
   opts.separator "  path:/path/bin    — add to PATH"
+  opts.separator "  (leading ~ is expanded to $HOME)"
+  opts.separator ""
+  opts.separator "Typical .sandbox-mounts recipes (lines below are copy-paste ready):"
+  opts.separator ""
+  opts.separator "# Haskell (ghcup)"
+  opts.separator "ro:~/.ghcup"
+  opts.separator "path:~/.ghcup/bin"
+  opts.separator ""
+  opts.separator "# OCaml (opam)"
+  opts.separator "ro:~/.opam"
+  opts.separator opam_path_line
+  opts.separator ""
+  opts.separator "# Node — nvm"
+  opts.separator "ro:~/.nvm"
+  opts.separator "path:~/.nvm/versions/node/<version>/bin"
+  opts.separator ""
+  opts.separator "# Node — volta"
+  opts.separator "ro:~/.volta"
+  opts.separator "path:~/.volta/bin"
+  opts.separator ""
+  opts.separator "# Node — fnm"
+  opts.separator "ro:~/.local/share/fnm"
+  opts.separator "path:~/.local/share/fnm/aliases/default/bin"
+  opts.separator ""
+  opts.separator "# Rust (rustup + cargo)"
+  opts.separator "ro:~/.rustup"
+  opts.separator "rw:~/.cargo            # cargo writes to registry/cache; use ro: if you prefer"
+  opts.separator "path:~/.cargo/bin"
+  opts.separator ""
+  opts.separator "# Python — pyenv"
+  opts.separator "ro:~/.pyenv"
+  opts.separator "path:~/.pyenv/shims"
+  opts.separator "path:~/.pyenv/bin"
+  opts.separator ""
+  opts.separator "# Python — uv"
+  opts.separator "rw:~/.cache/uv         # uv needs a writable cache"
+  opts.separator "ro:~/.local/share/uv"
+  opts.separator "path:~/.local/bin"
+  opts.separator ""
+  opts.separator "# Python — pipx"
+  opts.separator "ro:~/.local/pipx"
+  opts.separator "path:~/.local/bin"
 end
 
 parser.order!
@@ -128,6 +207,15 @@ args.push(*ro("/usr"), *ro("/lib"), *ro("/lib64"),
           *ro("/bin"), *ro("/sbin"), *ro("/etc"))
 args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp")
 
+# Chrome (and a lot of other tooling) wants /dev/shm. bwrap's --dev mounts a
+# minimal devtmpfs without it, so add an explicit tmpfs.
+args.push("--tmpfs", "/dev/shm")
+
+# Auto-mount Chrome/Chromium install dir so projects can drive a CDP browser
+# without per-project .sandbox-mounts entries.
+chrome_dir = detect_chrome_install_dir
+args.push(*ro(chrome_dir)) if chrome_dir
+
 # X11 clipboard access
 x11_socket = "/tmp/.X11-unix"
 args.push(*ro(x11_socket)) if File.directory?(x11_socket)
@@ -170,6 +258,13 @@ codex_dir   = "#{home}/.codex"
 args.push(*ro(local_dir))    if File.directory?(local_dir)
 args.push(*rw(claude_dir))   if File.directory?(claude_dir)
 args.push(*rw(claude_json))  if File.exist?(claude_json)
+# Native Claude Code install: runtime state/lock + versioned binaries live under
+# ~/.local, which is mounted read-only above. Overlay these subtrees rw so the
+# native `claude` binary can take its launch lock and self-manage versions.
+claude_state_dir = "#{home}/.local/state/claude"
+claude_share_dir = "#{home}/.local/share/claude"
+args.push(*rw(claude_state_dir)) if File.directory?(claude_state_dir)
+args.push(*rw(claude_share_dir)) if File.directory?(claude_share_dir)
 args.push(*rw(codex_dir))    if File.directory?(codex_dir)
 args.push(*rw(gemini_dir))   if File.directory?(gemini_dir)
 args.push(*rw(qwen_dir))     if File.directory?(qwen_dir)
@@ -226,7 +321,9 @@ if File.exist?(sandbox_mounts)
   File.readlines(sandbox_mounts).each do |line|
     line = line.strip
     next if line.empty? || line.start_with?("#")
+    line = line.sub(/\s+#.*\z/, "") # strip inline comments (recipes are copy-paste ready)
     mode, path = line.split(":", 2)
+    path = path.strip
     path = File.expand_path(path)
     case mode
     when "ro"   then args.push(*ro(path)) if File.exist?(path)
@@ -260,7 +357,9 @@ args.push("--clearenv",
           *(ENV["DISPLAY"] ? ["--setenv", "DISPLAY", ENV["DISPLAY"]] : []),
           *(ENV["DBUS_SESSION_BUS_ADDRESS"] ? ["--setenv", "DBUS_SESSION_BUS_ADDRESS", ENV["DBUS_SESSION_BUS_ADDRESS"]] : []),
           *(ENV["DISABLE_AUTO_COMPACT"] ? ["--setenv", "DISABLE_AUTO_COMPACT", "1"] : []),
-          *(ENV["XDG_RUNTIME_DIR"] ? ["--setenv", "XDG_RUNTIME_DIR", ENV["XDG_RUNTIME_DIR"]] : []))
+          *(ENV["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] ? ["--setenv", "CLAUDE_CODE_DISABLE_AUTO_MEMORY", ENV["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]] : []),
+          *(ENV["XDG_RUNTIME_DIR"] ? ["--setenv", "XDG_RUNTIME_DIR", ENV["XDG_RUNTIME_DIR"]] : []),
+          *(ENV["GH_TOKEN"] ? ["--setenv", "GH_TOKEN", ENV["GH_TOKEN"]] : []))
 
 # --- sandboxed tmux server ---
 
