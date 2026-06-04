@@ -3,6 +3,7 @@
 # Symlink to your ~/.local/bin/ directory
 
 require "fileutils"
+require "open3"
 require "optparse"
 require "shellwords"
 require "tmpdir"
@@ -172,6 +173,30 @@ def bind_command_symlink_target!(args, command, path_dirs)
   args.push(*ro(mount_path))
 end
 
+def git_metadata_paths(repo_dir)
+  out, _err, status = Open3.capture3(
+    "git",
+    "-C",
+    repo_dir,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-dir",
+    "--git-common-dir"
+  )
+  return [] unless status.success?
+
+  paths = out.lines(chomp: true).reject(&:empty?)
+  git_file = File.join(repo_dir, ".git")
+  paths << git_file if File.exist?(git_file)
+  paths.uniq.select { |path| File.exist?(path) }
+end
+
+def bind_git_metadata!(args, repo_dir, writable:)
+  git_metadata_paths(repo_dir).each do |path|
+    args.push(*(writable ? rw(path) : ro(path)))
+  end
+end
+
 # --- detect paths ---
 
 home = ENV.fetch("HOME")
@@ -180,6 +205,7 @@ term = ENV.fetch("TERM", "xterm-256color")
 nvm_bin        = ENV["NVM_BIN"] || `bash -c 'source #{home}/.nvm/nvm.sh 2>/dev/null && echo -n "$NVM_BIN"'`
 nvm_bin        = nil if nvm_bin.empty?
 gitconfig      = "#{home}/.gitconfig"
+gitignore      = "#{home}/.gitignore"
 password_store = "#{home}/.password-store"
 gnupg_dir      = "#{home}/.gnupg"
 gpg_agent_dir  = "/run/user/#{Process.uid}/gnupg"
@@ -246,6 +272,7 @@ args.push(*ro(keyring_dir))  if File.directory?(keyring_dir)
 # Home: tmpfs overlay, then selective mounts
 args.push("--tmpfs", home)
 args.push(*ro(gitconfig))
+args.push(*ro(gitignore)) if File.exist?(gitignore)
 args.push(*rw("#{home}/.pi"))
 
 # Agent config/data directories
@@ -283,6 +310,7 @@ args.push(*rw(cache_dir))    if File.directory?(cache_dir)
 pictures_dir = "#{home}/Pictures"
 args.push(*ro(pictures_dir)) if File.directory?(pictures_dir)
 args.push(*rw(project_dir))
+bind_git_metadata!(args, project_dir, writable: flags[:rw_git])
 
 # Bind-mount symlink targets so relative symlinks work
 Dir.children(project_dir).each do |name|
@@ -295,10 +323,7 @@ Dir.children(project_dir).each do |name|
   if File.directory?(target)
     warn "Binding symlink target: #{target}"
     args.push(*rw(target))
-    # Also protect .git inside symlink targets
-    if !flags[:rw_git] && File.directory?("#{target}/.git")
-      args.push(*ro("#{target}/.git"))
-    end
+    bind_git_metadata!(args, target, writable: flags[:rw_git])
   end
 end
 
@@ -309,10 +334,6 @@ if nvm_bin
 end
 
 args.push(*ro(password_store), *ro(gnupg_dir), *ro(gpg_agent_dir))
-
-if !flags[:rw_git] && File.directory?("#{project_dir}/.git")
-  args.push(*ro("#{project_dir}/.git"))
-end
 
 # --- Project-specific extra mounts (.sandbox-mounts) ---
 extra_path_dirs = []
@@ -354,6 +375,7 @@ args.push("--clearenv",
           "--setenv", "TERM", term,
           "--setenv", "COLORTERM", colorterm,
           "--setenv", "LANG", lang,
+          *(!flags[:rw_git] ? ["--setenv", "GIT_OPTIONAL_LOCKS", "0"] : []),
           *(ENV["DISPLAY"] ? ["--setenv", "DISPLAY", ENV["DISPLAY"]] : []),
           *(ENV["DBUS_SESSION_BUS_ADDRESS"] ? ["--setenv", "DBUS_SESSION_BUS_ADDRESS", ENV["DBUS_SESSION_BUS_ADDRESS"]] : []),
           *(ENV["DISABLE_AUTO_COMPACT"] ? ["--setenv", "DISABLE_AUTO_COMPACT", "1"] : []),
