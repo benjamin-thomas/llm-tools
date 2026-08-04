@@ -77,9 +77,7 @@ window has been renamed. Run `list` first to see the indices.
 - **Success means the pane reacted, not that the agent understood.** Even on
   exit `0`, `read` the pane before concluding a mission landed.
 - Codex windows are handled automatically (Codex needs a special typing
-  sequence); you do not do anything different for them. Detection reads the
-  agent's process argv, not just the window name, because a Codex installed as
-  an npm package runs as a bare `node`.
+  sequence); you do not do anything different for them.
 - Keep the human in the loop and summarize each agent's result clearly. When
   comparing agents, say where they agree and where they diverge.
 - Ask the human before broad, risky, destructive, or costly dispatches — for

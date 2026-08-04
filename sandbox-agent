@@ -40,6 +40,25 @@ def detect_chrome_install_dir
   nil
 end
 
+# Resolve the Go toolchain the caller's shell actually uses. Rather than hardcode
+# a GOROOT location (it varies a lot: /usr/local/go, distro /usr/bin, asdf, or a
+# JetBrains/golang.org-dl dir like ~/sdk/<version>), find the first `go` on PATH
+# and ask it for GOROOT/GOPATH, so the sandbox tracks the same version as the
+# shell launching it. Returns {root:, path:} or nil. (GOPATH may be a list — we
+# take the first entry, the one `go install` writes to.)
+def detect_go_paths
+  go = ENV["PATH"].to_s.split(File::PATH_SEPARATOR)
+                 .map { |dir| File.join(dir, "go") }
+                 .find { |p| File.file?(p) && File.executable?(p) }
+  return nil unless go
+
+  out, _err, status = Open3.capture3(go, "env", "GOROOT", "GOPATH")
+  return nil unless status.success?
+
+  root, path = out.lines(chomp: true)
+  { root: root, path: path.to_s.split(File::PATH_SEPARATOR).first }
+end
+
 opam_switch = detect_opam_switch
 opam_path_line = opam_switch ? "path:~/.opam/#{opam_switch}/bin" : "path:~/.opam/<switch>/bin   # e.g. ~/.opam/5.3.0/bin"
 
@@ -58,24 +77,31 @@ parser = OptionParser.new do |opts|
   opts.separator "to switch windows)."
   opts.separator ""
   opts.separator "Examples:"
-  opts.separator "  sandbox-agent . -- pi"
-  opts.separator "  sandbox-agent /path/to/project -- pi -p 'fix the bug'"
+  opts.separator "  sandbox-agent . -- claude-yolo"
+  opts.separator "  sandbox-agent /path/to/project -- codex-yolo"
   opts.separator ""
-  opts.separator "Multi-agent orchestration (tmux-orchestrator):"
-  opts.separator "  sandbox-agent . -- tmux-orchestrator run                # workers share the project sandbox"
-  opts.separator "  sandbox-agent . -- tmux-orchestrator run --cd-workers   # each worker isolated in sibling worker-<name>/"
+  opts.separator "Multi-agent coordination (tmux-orchestrator):"
+  opts.separator "  Launch one agent per tmux window (Ctrl-o c opens a new window), then let"
+  opts.separator "  one window act as coordinator and dispatch to / read the others by index"
+  opts.separator "  (you never have to name windows):"
+  opts.separator "    tmux-orchestrator list                     # session + windows (with indices)"
+  opts.separator "    tmux-orchestrator send 2 'do X'            # dispatch to one agent"
+  opts.separator "    tmux-orchestrator broadcast 're-review'    # dispatch to every agent"
+  opts.separator "    tmux-orchestrator read 2                   # read an agent's output"
+  opts.separator "    tmux-orchestrator rename 2 backend         # optional readable label"
   opts.separator ""
   opts.separator "Low-intervention \"yolo\" wrappers (see ~/.local/bin/*-yolo):"
   opts.separator "  sandbox-agent . -- claude-yolo"
-  opts.separator "  sandbox-agent . -- gemini-yolo"
-  opts.separator "  sandbox-agent . -- qwen-yolo"
   opts.separator "  sandbox-agent . -- codex-yolo"
+  opts.separator "  sandbox-agent . -- kimi -y"
+  opts.separator "  sandbox-agent . -- grok --always-approve"
   opts.separator "  sandbox-agent . -- opencode       # already yolo by default"
   opts.separator "  sandbox-agent . -- pi             # already yolo by default"
   opts.separator ""
   opts.separator "Auto-mounted when present on the host (no .sandbox-mounts needed):"
   opts.separator "  Chrome/Chromium install dir — for projects driving a CDP browser"
   opts.separator "  /dev/shm tmpfs              — required by Chrome and many tools"
+  opts.separator "  Go toolchain + GOPATH       — tracks whichever `go` is on your PATH"
   opts.separator ""
   opts.separator "Projects can provide a .sandbox-mounts file for extra mounts:"
   opts.separator "  ro:/path          — read-only mount"
@@ -85,9 +111,12 @@ parser = OptionParser.new do |opts|
   opts.separator ""
   opts.separator "Typical .sandbox-mounts recipes (lines below are copy-paste ready):"
   opts.separator ""
-  opts.separator "# Haskell (ghcup)"
-  opts.separator "ro:~/.ghcup"
-  opts.separator "path:~/.ghcup/bin"
+  opts.separator "# Haskell (ghcup + cabal)"
+  opts.separator "rw:~/.ghcup             # ghcup writes logs/, cache/, tmp/, trash/ (tui needs rw)"
+  opts.separator "path:~/.ghcup/bin       # ghc, cabal, hls all live here"
+  opts.separator "rw:~/.config/cabal      # cabal config (XDG layout; classic setups: rw:~/.cabal)"
+  opts.separator "rw:~/.local/state/cabal # cabal store/logs — overrides the ro ~/.local mount"
+  opts.separator "# (the package cache ~/.cache/cabal is auto-mounted)"
   opts.separator ""
   opts.separator "# OCaml (opam)"
   opts.separator "ro:~/.opam"
@@ -109,6 +138,8 @@ parser = OptionParser.new do |opts|
   opts.separator "ro:~/.rustup"
   opts.separator "rw:~/.cargo            # cargo writes to registry/cache; use ro: if you prefer"
   opts.separator "path:~/.cargo/bin"
+  opts.separator ""
+  opts.separator "# Go — auto-detected from your PATH; no entry needed (see list above)"
   opts.separator ""
   opts.separator "# Python — pyenv"
   opts.separator "ro:~/.pyenv"
@@ -161,6 +192,17 @@ def find_command_path(command, path_dirs)
   nil
 end
 
+# Later mounts win in bwrap, so a ro bind added for a command's symlink target
+# would shadow a rw mount made earlier — e.g. ~/.grok holds both the `grok`
+# binary and the state it writes, likewise ~/.local/share/claude. Detect that.
+def bound_rw?(args, path)
+  args.each_index.any? do |i|
+    next false unless args[i] == "--bind"
+    src = args[i + 1]
+    path == src || path.start_with?("#{src}/")
+  end
+end
+
 def bind_command_symlink_target!(args, command, path_dirs)
   command_path = find_command_path(command, path_dirs)
   return unless command_path && File.symlink?(command_path)
@@ -168,6 +210,7 @@ def bind_command_symlink_target!(args, command, path_dirs)
   target = File.realpath(command_path)
   mount_path = File.directory?(target) ? target : File.dirname(target)
   return unless File.directory?(mount_path)
+  return if bound_rw?(args, mount_path)
 
   warn "Binding command symlink target: #{mount_path}"
   args.push(*ro(mount_path))
@@ -253,17 +296,23 @@ args.push(*rw(claude_ipc)) if File.directory?(claude_ipc)
 # DNS
 args.push(*ro(resolvconf_dir))
 
-# Audio devices (for speech/dictation)
+# Audio devices (for speech/dictation, e.g. grok's voice mode or dictate.py).
+# Must be --dev-bind: a plain --bind/--ro-bind mounts the nodes nodev, so every
+# open() of /dev/snd/control* fails and ALSA reports "no soundcards found"
+# (`arecord -l` empty, hw:/plughw: devices unusable). Only matters for the
+# direct-ALSA path — capture through the sound server below needs no device.
 snd_dir = "/dev/snd"
-args.push(*ro(snd_dir)) if File.directory?(snd_dir)
+args.push("--dev-bind", snd_dir, snd_dir) if File.directory?(snd_dir)
 
-# PulseAudio / PipeWire sockets
+# PulseAudio / PipeWire sockets. This is the path recorders normally take:
+# grok's voice capture shells out to the first of pw-record / parec / arecord
+# it finds on PATH, all of which talk to the sound server over these sockets.
 pulse_dir       = "/run/user/#{Process.uid}/pulse"
 pipewire_socket = "/run/user/#{Process.uid}/pipewire-0"
 args.push(*ro(pulse_dir))       if File.directory?(pulse_dir)
 args.push(*ro(pipewire_socket)) if File.exist?(pipewire_socket)
 
-# D-Bus + keyring (agent auth: Gemini, etc.)
+# D-Bus + keyring (agent auth for keyring-backed CLIs)
 dbus_socket = "/run/user/#{Process.uid}/bus"
 keyring_dir = "/run/user/#{Process.uid}/keyring"
 args.push(*ro(dbus_socket))  if File.exist?(dbus_socket)
@@ -273,13 +322,10 @@ args.push(*ro(keyring_dir))  if File.directory?(keyring_dir)
 args.push("--tmpfs", home)
 args.push(*ro(gitconfig))
 args.push(*ro(gitignore)) if File.exist?(gitignore)
-args.push(*rw("#{home}/.pi"))
 
 # Agent config/data directories
 local_dir = "#{home}/.local"
 claude_dir = "#{home}/.claude"
-gemini_dir = "#{home}/.gemini"
-qwen_dir   = "#{home}/.qwen"
 claude_json = "#{home}/.claude.json"
 codex_dir   = "#{home}/.codex"
 args.push(*ro(local_dir))    if File.directory?(local_dir)
@@ -293,18 +339,135 @@ claude_share_dir = "#{home}/.local/share/claude"
 args.push(*rw(claude_state_dir)) if File.directory?(claude_state_dir)
 args.push(*rw(claude_share_dir)) if File.directory?(claude_share_dir)
 args.push(*rw(codex_dir))    if File.directory?(codex_dir)
-args.push(*rw(gemini_dir))   if File.directory?(gemini_dir)
-args.push(*rw(qwen_dir))     if File.directory?(qwen_dir)
+# Kimi Code: ~/.kimi-code holds the binary plus OAuth locks, sessions and logs
+# (all written at runtime — rw), ~/.kimi holds config/credentials (rw),
+# ~/.config/kimi holds user agents (rw).
+kimi_dir        = "#{home}/.kimi"
+kimi_config_dir = "#{home}/.config/kimi"
+kimi_code_dir   = "#{home}/.kimi-code"
+args.push(*rw(kimi_dir))        if File.directory?(kimi_dir)
+args.push(*rw(kimi_config_dir)) if File.directory?(kimi_config_dir)
+args.push(*rw(kimi_code_dir))   if File.directory?(kimi_code_dir)
+# Kimi user skills live in ~/.agents/skills as symlinks into this repo's
+# global-skills. Mount rw, not ro: llm-skills install/import manage those links,
+# and skills are curated from inside a sandbox session. ~/.claude and ~/.codex
+# are already rw above, so a ro mount here made kimi the one CLI whose skills
+# could not be installed without leaving the sandbox (EROFS on symlink create).
+# Pairs with the rw global-skills overlay below — editing a skill needs the
+# content writable, (re)installing one needs the link directory writable.
+agents_dir = "#{home}/.agents"
+args.push(*rw(agents_dir)) if File.directory?(agents_dir)
 opencode_cfg = "#{home}/.config/opencode"
 opencode_data = "#{home}/.local/share/opencode"
-args.push(*rw(opencode_cfg))  if File.directory?(opencode_cfg)
-args.push(*rw(opencode_data)) if File.directory?(opencode_data)
+# ~/.local/state/opencode holds runtime locks/state and falls under the ro
+# ~/.local mount above — overlay it rw or opencode crashes with EROFS trying to
+# create its lock files (mkdir .../locks/<hash>.lock).
+opencode_state = "#{home}/.local/state/opencode"
+args.push(*rw(opencode_cfg))   if File.directory?(opencode_cfg)
+args.push(*rw(opencode_data))  if File.directory?(opencode_data)
+args.push(*rw(opencode_state)) if File.directory?(opencode_state)
+# pi: ~/.pi holds config/auth plus runtime state (sessions, logs), all written
+# at runtime — mount rw. pi is yolo by default.
+pi_dir = "#{home}/.pi"
+args.push(*rw(pi_dir)) if File.directory?(pi_dir)
 
-# Skills under ~/.claude/skills, ~/.codex/skills, ~/.pi/agent/prompts, etc.
-# are symlinks into this repo (see llm-tools/global-skills + `llm-skills import`).
-# Without this mount, those symlinks dangle inside the sandbox and no skill loads.
-global_skills = "#{home}/code/github.com/benjamin-thomas/llm-tools/global-skills"
-args.push(*ro(global_skills)) if File.directory?(global_skills)
+# grok (xAI): everything lives under one dir (GROK_HOME, default ~/.grok) — the
+# binary itself (~/.local/bin/grok symlinks into downloads/), config.toml,
+# auth.json, plus lock files, sessions, logs and worktrees.db written at
+# runtime. Mount rw. Its bin/ goes on PATH below so `grok` resolves even when
+# the ~/.local/bin symlink is absent.
+grok_dir = ENV["GROK_HOME"]&.then { |d| File.expand_path(d) } || "#{home}/.grok"
+args.push(*rw(grok_dir)) if File.directory?(grok_dir)
+
+# VS Code / Devin Desktop (Electron IDEs). The binaries resolve under
+# /usr/share (already mounted ro), so only the per-user state under $HOME
+# needs binding — and rw, since Electron writes caches, lock files and
+# state DBs continuously. VS Code keeps user data in ~/.config/Code and
+# extensions in ~/.vscode; Devin (a VS Code fork) mirrors this with
+# ~/.config/Devin + ~/.devin, plus a small ~/.config/devin (cli/config).
+vscode_config = "#{home}/.config/Code"
+vscode_exts   = "#{home}/.vscode"
+devin_config  = "#{home}/.config/Devin"
+devin_cli     = "#{home}/.config/devin"
+devin_exts    = "#{home}/.devin"
+args.push(*rw(vscode_config)) if File.directory?(vscode_config)
+args.push(*rw(vscode_exts))   if File.directory?(vscode_exts)
+args.push(*rw(devin_config))  if File.directory?(devin_config)
+args.push(*rw(devin_cli))     if File.directory?(devin_cli)
+args.push(*rw(devin_exts))    if File.directory?(devin_exts)
+# Devin's agent backend ("devin acp", a Rust binary from the windsurf/codeium
+# stack) keeps state outside ~/.config/Devin: logs + sessions.db live under
+# ~/.local/share/devin, which falls under the ro ~/.local mount above — overlay
+# it rw or the binary panics with ReadOnlyFilesystem creating its rolling log.
+# ~/.codeium holds the matching codeium/windsurf auth + state.
+devin_share = "#{home}/.local/share/devin"
+codeium_dir = "#{home}/.codeium"
+args.push(*rw(devin_share)) if File.directory?(devin_share)
+args.push(*rw(codeium_dir)) if File.directory?(codeium_dir)
+
+# MoonBit toolchain (~/.moon): the IDE spawns ~/.moon/bin/moon-lsp by absolute
+# path, and `moon` writes build/registry caches here, so mount rw (like cargo).
+# Its bin/ is added to PATH below so the moon CLI and the tools it shells out
+# to (moonc, moonfmt, ...) resolve in the sandbox terminal too.
+moon_dir = "#{home}/.moon"
+args.push(*rw(moon_dir)) if File.directory?(moon_dir)
+
+# asdf version manager. The `asdf` binary lives in ~/.local/bin (already on
+# PATH), but its data dir (ASDF_DATA_DIR, default ~/.asdf) holds the plugins,
+# installs, shims and downloads — hidden by the tmpfs home. Mount it rw (asdf
+# writes downloads/, installs/, tmp/), add its shims/ to PATH below, and pass
+# ASDF_DATA_DIR through so a non-default location is honoured.
+asdf_dir = ENV["ASDF_DATA_DIR"]&.then { |d| File.expand_path(d) } || "#{home}/.asdf"
+args.push(*rw(asdf_dir)) if File.directory?(asdf_dir)
+
+# Go toolchain + GOPATH, tracking whatever `go` is on the caller's PATH (see
+# detect_go_paths). GOROOT is mounted ro; GOPATH rw (module cache + 'go install'
+# bins). Both bin dirs go on PATH below. GOCACHE (~/.cache/go-build) is already
+# covered by the ~/.cache mount.
+go_paths = detect_go_paths
+if go_paths
+  args.push(*ro(go_paths[:root])) if go_paths[:root] && File.directory?(go_paths[:root])
+  args.push(*rw(go_paths[:path])) if go_paths[:path] && File.directory?(go_paths[:path])
+end
+
+# bun: globally-installed CLIs (opencode, etc.) live under ~/.bun as standalone
+# binaries symlinked from ~/.bun/bin. Mount ro and add ~/.bun/bin to PATH below
+# so `bun`/`bunx` and bun-installed tools resolve (mirrors the nvm handling).
+bun_dir = "#{home}/.bun"
+args.push(*ro(bun_dir)) if File.directory?(bun_dir)
+
+# WakaTime: ~/.wakatime.cfg holds the api key (ro), ~/.wakatime holds the
+# bundled cli + offline-heartbeat db + internal cfg (rw — the cli writes here).
+wakatime_cfg = "#{home}/.wakatime.cfg"
+wakatime_dir = "#{home}/.wakatime"
+args.push(*ro(wakatime_cfg)) if File.exist?(wakatime_cfg)
+args.push(*rw(wakatime_dir)) if File.directory?(wakatime_dir)
+
+# The llm-tools repo backs a set of ~/.local/bin tools and CLI skills through
+# symlinks that resolve back into it: tmux-orchestrator (+ tmux_orchestrator.py),
+# llm-skills, and the per-CLI skills under ~/.claude/skills, ~/.codex/skills,
+# ~/.agents/skills, etc. Mount the repo root ro so those symlinks resolve inside
+# the sandbox AND the coordinator can invoke tmux-orchestrator at runtime.
+# Skipped when the sandboxed project already covers the repo (it is the repo, or
+# a parent/child of it) to avoid a conflicting double bind. global-skills is a
+# subpath, so the skill symlinks are covered by this single mount.
+llm_tools_root = "#{home}/code/github.com/benjamin-thomas/llm-tools"
+llm_tools_covered =
+  project_dir == llm_tools_root ||
+  project_dir.start_with?("#{llm_tools_root}/") ||
+  llm_tools_root.start_with?("#{project_dir}/")
+args.push(*ro(llm_tools_root)) if File.directory?(llm_tools_root) && !llm_tools_covered
+
+# global-skills stays writable even though the repo around it is ro: skills are
+# edited from inside a sandbox session, and a ro mount makes that impossible
+# without leaving the sandbox. Later mounts win in bwrap, so this rw bind
+# overlays the ro repo mount above. When the sandboxed project *is* llm-tools
+# the rw project mount below already covers it, hence the same guard.
+global_skills_dir = "#{llm_tools_root}/global-skills"
+if File.directory?(global_skills_dir) && !llm_tools_covered
+  args.push(*rw(global_skills_dir))
+end
+
 cache_dir = "#{home}/.cache"
 args.push(*rw(cache_dir))    if File.directory?(cache_dir)
 pictures_dir = "#{home}/Pictures"
@@ -364,6 +527,12 @@ path_dirs = [
   "#{home}/.local/bin",
   *extra_path_dirs,
   *(nvm_bin ? [nvm_bin] : []),
+  *(File.directory?(moon_dir) ? ["#{moon_dir}/bin"] : []),
+  *(File.directory?("#{kimi_code_dir}/bin") ? ["#{kimi_code_dir}/bin"] : []),
+  *(File.directory?("#{grok_dir}/bin") ? ["#{grok_dir}/bin"] : []),
+  *(File.directory?("#{asdf_dir}/shims") ? ["#{asdf_dir}/shims"] : []),
+  *(go_paths ? [go_paths[:root], go_paths[:path]].compact.map { |d| "#{d}/bin" } : []),
+  *(File.directory?("#{bun_dir}/bin") ? ["#{bun_dir}/bin"] : []),
   "/usr/local/bin", "/usr/bin", "/bin",
 ].compact
 
@@ -381,11 +550,20 @@ args.push("--clearenv",
           *(ENV["DISABLE_AUTO_COMPACT"] ? ["--setenv", "DISABLE_AUTO_COMPACT", "1"] : []),
           *(ENV["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] ? ["--setenv", "CLAUDE_CODE_DISABLE_AUTO_MEMORY", ENV["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]] : []),
           *(ENV["XDG_RUNTIME_DIR"] ? ["--setenv", "XDG_RUNTIME_DIR", ENV["XDG_RUNTIME_DIR"]] : []),
+          *(ENV["ASDF_DATA_DIR"] ? ["--setenv", "ASDF_DATA_DIR", ENV["ASDF_DATA_DIR"]] : []),
+          *(ENV["GROK_HOME"] ? ["--setenv", "GROK_HOME", ENV["GROK_HOME"]] : []),
+          # Desktop-environment hints. Electron/Chromium apps (VS Code, Devin)
+          # read these to pick the OS keyring backend for safeStorage; without
+          # them they can't detect GNOME and fall back to plaintext encryption,
+          # which can't decrypt host-stored login tokens (you appear logged out).
+          *(ENV["XDG_CURRENT_DESKTOP"] ? ["--setenv", "XDG_CURRENT_DESKTOP", ENV["XDG_CURRENT_DESKTOP"]] : []),
+          *(ENV["XDG_SESSION_TYPE"] ? ["--setenv", "XDG_SESSION_TYPE", ENV["XDG_SESSION_TYPE"]] : []),
+          *(ENV["DESKTOP_SESSION"] ? ["--setenv", "DESKTOP_SESSION", ENV["DESKTOP_SESSION"]] : []),
           *(ENV["GH_TOKEN"] ? ["--setenv", "GH_TOKEN", ENV["GH_TOKEN"]] : []))
 
 # --- sandboxed tmux server ---
 
-socket_dir = Dir.mktmpdir("pi-sandbox-")
+socket_dir = Dir.mktmpdir("sandbox-agent-")
 at_exit { FileUtils.rm_rf(socket_dir) }
 
 args.push(*rw(socket_dir), "--setenv", "TMUX_TMPDIR", socket_dir)
@@ -397,6 +575,7 @@ warn "---"
 cmd = [
   "tmux", "-f", "/dev/null",
   "set", "-g", "default-terminal", "tmux-256color", ";",
+  "set", "-g", "extended-keys", "on", ";",
   "set", "-g", "prefix", "C-o", ";",
   "bind", "C-o", "send-prefix", ";",
   "bind", "-n", "M-left", "prev", ";",

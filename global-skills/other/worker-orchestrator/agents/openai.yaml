@@ -1,0 +1,4 @@
+interface:
+  display_name: "Worker Orchestrator"
+  short_description: "Coordinate CLI agents running in sibling tmux windows"
+  default_prompt: "Use $worker-orchestrator to dispatch work to, and read output from, the agent windows via the local `tmux-orchestrator` command."

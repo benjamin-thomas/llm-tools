@@ -128,6 +128,14 @@ BEEP_STOP = os.path.join(STATE_DIR, 'beep-stop.wav')
 BEEP_READY = os.path.join(STATE_DIR, 'beep-ready.wav')
 
 SAMPLE_RATE = 16000
+WAV_HEADER_BYTES = 44
+BYTES_PER_SECOND = SAMPLE_RATE * 2  # S16_LE, mono
+
+# arecord takes ~130ms to open the capture device, and until then it has
+# written only the WAV header. Sending such a file makes the transcription
+# APIs reject it ("Audio file is too short. Minimum audio length is 0.01
+# seconds."), so treat anything that brief as a missed keypress.
+MIN_AUDIO_SECONDS = 0.05
 
 TERMINALS = frozenset({
     'gnome-terminal', 'xterm', 'urxvt', 'alacritty', 'kitty', 'konsole',
@@ -203,6 +211,17 @@ def copy_and_paste(text: str) -> None:
 
 # --- Transcription ------------------------------------------------------------
 
+def recorded_seconds(wav_path: str) -> float:
+    """Duration of audio actually captured.
+
+    Derived from the file size rather than the WAV header: arecord is stopped
+    with SIGINT and so never seeks back to patch its length field, leaving a
+    2GiB placeholder there.
+    """
+    payload = max(0, os.path.getsize(wav_path) - WAV_HEADER_BYTES)
+    return payload / BYTES_PER_SECOND
+
+
 def transcribe(wav_path: str) -> str:
     with open(wav_path, 'rb') as f:
         resp = requests.post(
@@ -211,7 +230,8 @@ def transcribe(wav_path: str) -> str:
             files={'file': ('audio.wav', f, 'audio/wav')},
             data={'model': MODEL},
         )
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(f'{resp.status_code} from {PROVIDER}: {resp.text.strip()}')
     payload: Any = resp.json()
     return str(payload['text']).strip()
 
@@ -268,7 +288,8 @@ def main() -> None:
         stop_recording()
         play_beep(BEEP_STOP)
         try:
-            if tmpfile and os.path.getsize(tmpfile) > 0:
+            captured = recorded_seconds(tmpfile) if tmpfile else 0.0
+            if tmpfile and captured >= MIN_AUDIO_SECONDS:
                 print(' transcribing...', end='', flush=True)
                 text = transcribe(tmpfile)
                 if text:
@@ -279,7 +300,8 @@ def main() -> None:
                 else:
                     print(' (empty)')
             else:
-                print(' (no audio)')
+                print(f' (no audio: captured {captured:.3f}s — is the mic muted or'
+                      f' still waking up? check `pactl info | grep "Default Source"`)')
         except Exception as e:
             print(f' ERROR: {e}')
         finally:

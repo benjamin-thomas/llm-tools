@@ -1,7 +1,5 @@
 __pycache__/
 /todo-data/*
 !/todo-data/.gitkeep
-.qwen/settings.json
 .codex
 .claude/settings.local.json
-/.tmux-orchestrator/
