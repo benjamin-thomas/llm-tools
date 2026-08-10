@@ -1,9 +1,9 @@
 ---
-name: rotating-tdd
-description: Use when the user wants several CLI agents to implement something together under strict TDD, taking turns — one writes the failing test, another makes it pass, a third reviews, and the roles rotate each cycle. Builds on the worker-orchestrator skill for transport. The human launches the agent sessions first and reviews every RED and GREEN.
+name: rotating-tdd-tmux
+description: Use when the user wants several CLI agents running in tmux to implement something together under strict TDD, taking turns — one writes the failing test, another makes it pass, a third reviews, and the roles rotate each cycle. Builds on the worker-orchestrator skill for transport. The human launches the agent sessions first and reviews every RED and GREEN.
 ---
 
-# Rotating TDD
+# Rotating TDD (tmux)
 
 Several agents implement one piece of work as a relay. Within each cycle the
 roles are split and then **rotated**, so the agent that writes the
