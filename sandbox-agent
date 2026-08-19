@@ -2,13 +2,40 @@
 
 # Symlink to your ~/.local/bin/ directory
 
+# --- Deliberately NOT granted — do not re-add ---
+#
+# Every mount is a hole in the sandbox. The ones below were big enough to hand
+# an agent the host itself, so they are gone on purpose. A broken tool is the
+# cheaper trade — if something needs one of these, the answer is no.
+#
+#   SSH, in every form: ~/.ssh (hidden by the tmpfs home), SSH_AUTH_SOCK, the
+#   gnome-keyring and gpg-agent ssh sockets, the ssh/scp/sftp binaries. An
+#   agent holding an ssh agent socket can log into every host you can.
+#
+#   The session D-Bus socket (/run/user/<uid>/bus). It is the Secret Service
+#   API: KWallet and gnome-keyring hand out saved passwords over it. This —
+#   not the X11 passthrough — is how an agent ends up talking to kwalletd.
+#
+#   The gnome-keyring socket dir (/run/user/<uid>/keyring): same secrets, plus
+#   its ssh agent.
+#
+#   XDG_CURRENT_DESKTOP / XDG_SESSION_TYPE / DESKTOP_SESSION: their only job
+#   was helping Electron apps find an OS keyring, i.e. the thing above.
+#
+# .sandbox-mounts cannot re-add them either (see forbidden_mounts) — that file
+# lives inside the project the agent can write to, so the check matters.
+#
+# Still granted, for the record: X11 (clipboard — note any X client can read
+# other windows' keystrokes), ~/.password-store + ~/.gnupg ro (commit signing),
+# ~/.cache rw, ~/.local ro, audio devices, the project dir rw.
+
 require "fileutils"
 require "open3"
 require "optparse"
 require "shellwords"
 require "tmpdir"
 
-flags = { rw_git: false }
+flags = { git_rw: false, mux: "tmux" }
 
 def detect_opam_switch
   config = File.expand_path("~/.opam/config")
@@ -70,11 +97,25 @@ parser = OptionParser.new do |opts|
   opts.separator "else under $HOME."
   opts.separator ""
 
-  opts.on("--rw-git", "Allow writing to .git (default: read-only)") { flags[:rw_git] = true }
+  opts.on("--git-rw", "Allow writing to .git (default: read-only)") { flags[:git_rw] = true }
+  opts.on("--mux MUX", %w[tmux herdr],
+          "Multiplexer for the sandboxed session: tmux (default) or herdr") { |mux| flags[:mux] = mux }
   opts.separator ""
-  opts.separator "The agent always runs inside a sandboxed tmux server so sub-agent"
-  opts.separator "panes stay confined. Use Ctrl-o as the tmux prefix (Alt-left/right"
-  opts.separator "to switch windows)."
+  opts.separator "Never available inside the sandbox, by design (see the header comment"
+  opts.separator "before re-adding any of it):"
+  opts.separator "  SSH — no keys, no agent socket, no ssh/scp/sftp binaries"
+  opts.separator "  Session D-Bus + gnome-keyring — the KWallet/Secret Service password API"
+  opts.separator "  The host multiplexer server — see the --mux note below"
+  opts.separator ""
+  opts.separator "The agent always runs inside a sandboxed multiplexer server so sub-agent"
+  opts.separator "panes stay confined. Ctrl-o is the prefix either way (with tmux,"
+  opts.separator "Alt-left/right switch windows)."
+  opts.separator ""
+  opts.separator "--mux herdr swaps tmux for herdr, which shows per-pane agent state"
+  opts.separator "(working / idle / blocked). Its server is reached over a socket that can"
+  opts.separator "start processes for whoever holds it, so the sandbox gets a private one"
+  opts.separator "via HERDR_SOCKET_PATH and ~/.config/herdr is never mounted — handing an"
+  opts.separator "agent the host socket would be a full sandbox escape."
   opts.separator ""
   opts.separator "Examples:"
   opts.separator "  sandbox-agent . -- claude-yolo"
@@ -97,6 +138,8 @@ parser = OptionParser.new do |opts|
   opts.separator "  sandbox-agent . -- grok --always-approve"
   opts.separator "  sandbox-agent . -- opencode       # already yolo by default"
   opts.separator "  sandbox-agent . -- pi             # already yolo by default"
+  opts.separator "  sandbox-agent . -- omp            # already yolo by default"
+  opts.separator "  sandbox-agent . -- prime-agent    # already yolo by default"
   opts.separator ""
   opts.separator "Auto-mounted when present on the host (no .sandbox-mounts needed):"
   opts.separator "  Chrome/Chromium install dir — for projects driving a CDP browser"
@@ -156,7 +199,11 @@ parser = OptionParser.new do |opts|
   opts.separator "path:~/.local/bin"
 end
 
-parser.order!
+begin
+  parser.order!
+rescue OptionParser::ParseError => e
+  abort "#{e.message}\n\n#{parser.help}"
+end
 project_dir = File.expand_path(ARGV.shift || abort(parser.help))
 ARGV.shift if ARGV.first == "--"
 abort "No command specified.\n\n#{parser.help}" if ARGV.empty?
@@ -166,6 +213,11 @@ cmd = ARGV.dup
 
 def ro(src, dest = src) = ["--ro-bind", src, dest]
 def rw(src, dest = src) = ["--bind",    src, dest]
+
+# Shadow a path that an earlier mount dragged in: bind /dev/null over it, so it
+# is still there but useless — exec fails, connect() fails (it is no longer a
+# socket). Later mounts win in bwrap, so masks must come after their mount.
+def mask(path) = ["--ro-bind", "/dev/null", path]
 
 def require_dir!(path, label)
   abort "#{label} not found: #{path}" unless File.directory?(path)
@@ -240,6 +292,17 @@ def bind_git_metadata!(args, repo_dir, writable:)
   end
 end
 
+# The one way to grant write access to a directory: code writable, git history
+# read-only unless --git-rw. Guarded on the mount root being a repo root, so a
+# repo nested inside a mount (ruby-advisory-db under ~/.local/share, which
+# bundle-audit updates via git fetch) keeps the writable .git its tooling needs.
+def bind_rw_mount!(args, path, git_writable:)
+  args.push(*rw(path))
+  return unless File.exist?(File.join(path, ".git"))
+
+  bind_git_metadata!(args, path, writable: git_writable)
+end
+
 # --- detect paths ---
 
 home = ENV.fetch("HOME")
@@ -288,6 +351,9 @@ args.push(*ro(chrome_dir)) if chrome_dir
 # X11 clipboard access
 x11_socket = "/tmp/.X11-unix"
 args.push(*ro(x11_socket)) if File.directory?(x11_socket)
+xauthority = ENV["XAUTHORITY"]&.then { |path| File.expand_path(path) }
+xauthority = nil unless xauthority && File.file?(xauthority)
+args.push(*ro(xauthority)) if xauthority
 
 # IDE connection sockets
 claude_ipc = "/tmp/claude-#{Process.uid}"
@@ -296,7 +362,7 @@ args.push(*rw(claude_ipc)) if File.directory?(claude_ipc)
 # DNS
 args.push(*ro(resolvconf_dir))
 
-# Audio devices (for speech/dictation, e.g. grok's voice mode or dictate.py).
+# Audio devices for OMP live/STT and direct-ALSA speech/dictation.
 # Must be --dev-bind: a plain --bind/--ro-bind mounts the nodes nodev, so every
 # open() of /dev/snd/control* fails and ALSA reports "no soundcards found"
 # (`arecord -l` empty, hw:/plughw: devices unusable). Only matters for the
@@ -304,19 +370,15 @@ args.push(*ro(resolvconf_dir))
 snd_dir = "/dev/snd"
 args.push("--dev-bind", snd_dir, snd_dir) if File.directory?(snd_dir)
 
-# PulseAudio / PipeWire sockets. This is the path recorders normally take:
-# grok's voice capture shells out to the first of pw-record / parec / arecord
-# it finds on PATH, all of which talk to the sound server over these sockets.
+# PulseAudio / PipeWire sockets. OMP's native Linux voice backend prefers
+# PulseAudio and falls back to ALSA; recorder CLIs use these sockets too.
 pulse_dir       = "/run/user/#{Process.uid}/pulse"
 pipewire_socket = "/run/user/#{Process.uid}/pipewire-0"
 args.push(*ro(pulse_dir))       if File.directory?(pulse_dir)
 args.push(*ro(pipewire_socket)) if File.exist?(pipewire_socket)
 
-# D-Bus + keyring (agent auth for keyring-backed CLIs)
-dbus_socket = "/run/user/#{Process.uid}/bus"
-keyring_dir = "/run/user/#{Process.uid}/keyring"
-args.push(*ro(dbus_socket))  if File.exist?(dbus_socket)
-args.push(*ro(keyring_dir))  if File.directory?(keyring_dir)
+# No D-Bus session socket and no keyring dir: both are the Secret Service (and
+# the keyring dir also holds an ssh agent). See the header — do not re-add.
 
 # Home: tmpfs overlay, then selective mounts
 args.push("--tmpfs", home)
@@ -370,6 +432,54 @@ args.push(*rw(opencode_state)) if File.directory?(opencode_state)
 # at runtime — mount rw. pi is yolo by default.
 pi_dir = "#{home}/.pi"
 args.push(*rw(pi_dir)) if File.directory?(pi_dir)
+# Oh My Pi: ~/.omp holds config/auth plus runtime-written sessions, logs,
+# caches, extracted native addons, and daemon/browser state.
+omp_dir = "#{home}/.omp"
+args.push(*rw(omp_dir)) if File.directory?(omp_dir)
+
+# Prime Agent — a pi fork, so the same shape one directory over. ~/.prime/agent
+# is the config dir (auth.json, models.json, settings.json, keybindings.json)
+# and also holds everything written at runtime: sessions, session-leases,
+# session-artifacts, daemon-workers, logs, plus kernel-venv, the Python venv it
+# bootstraps for its IPython tool. ~/.prime/supervisor-owners sits one level up
+# (the daemon ownership registry), so bind the whole tree rw rather than just
+# the agent dir. PRIME_AGENT_CODING_AGENT_DIR relocates the agent dir; honour it
+# like GROK_HOME/ASDF_DATA_DIR are honoured, and pass it through below.
+prime_dir = "#{home}/.prime"
+args.push(*rw(prime_dir)) if File.directory?(prime_dir)
+prime_agent_dir = ENV["PRIME_AGENT_CODING_AGENT_DIR"]&.then { |d| File.expand_path(d) }
+args.push(*rw(prime_agent_dir)) if prime_agent_dir && File.directory?(prime_agent_dir)
+# Note what is deliberately NOT reachable here: prime-agent's daemon socket is
+# $TMPDIR/prime-agent-<uid>/daemon.sock, and that socket starts agent processes
+# for whoever holds it — the same escape the mux sockets below guard against.
+# The sandbox gets its own because /tmp is a tmpfs and TMPDIR is not passed
+# through, so the host daemon is simply not there. Mounting /tmp (or exporting
+# TMPDIR) would hand a sandboxed agent the host's daemon; don't.
+#
+# A private socket is only half of it. prime-agent runs its agents in a daemon
+# and tracks that daemon in three directories under ~/.prime, by raw PID and by
+# socket path — both of which are namespace-local here, since the sandbox has
+# its own PID namespace (--unshare-pid, below) and its own /tmp. Leave them
+# shared and a sandboxed daemon overwrites the *host's* bookkeeping with numbers
+# that mean nothing outside the sandbox:
+#
+#   supervisor-owners/    the daemon ownership registry. A sandbox claiming it
+#                         orphans the host's live supervisor, which then fails
+#                         every launch with "no longer owns its registry entry".
+#   agent/daemon-workers/ per-worker descriptors, likewise pid-keyed.
+#   agent/session-leases/ who currently holds a session. Worst of the three: a
+#                         namespaced pid can *alias a live host process* (a
+#                         leftover lease for "pid 124" matched a kernel thread),
+#                         so the staleness check never fires and the session
+#                         stays locked forever.
+#
+# One private tmpfs each fixes both directions at once — the host is protected,
+# and any number of sandboxes get fully independent daemons. Everything worth
+# sharing still is: auth.json, models.json, settings.json, keybindings.json,
+# sessions/, session-artifacts/ and the (expensive) kernel venv.
+%w[supervisor-owners agent/daemon-workers agent/session-leases].each do |sub|
+  args.push("--tmpfs", "#{prime_dir}/#{sub}")
+end
 
 # grok (xAI): everything lives under one dir (GROK_HOME, default ~/.grok) — the
 # binary itself (~/.local/bin/grok symlinks into downloads/), config.toml,
@@ -473,7 +583,7 @@ args.push(*rw(cache_dir))    if File.directory?(cache_dir)
 pictures_dir = "#{home}/Pictures"
 args.push(*ro(pictures_dir)) if File.directory?(pictures_dir)
 args.push(*rw(project_dir))
-bind_git_metadata!(args, project_dir, writable: flags[:rw_git])
+bind_git_metadata!(args, project_dir, writable: flags[:git_rw])
 
 # Bind-mount symlink targets so relative symlinks work
 Dir.children(project_dir).each do |name|
@@ -485,8 +595,7 @@ Dir.children(project_dir).each do |name|
 
   if File.directory?(target)
     warn "Binding symlink target: #{target}"
-    args.push(*rw(target))
-    bind_git_metadata!(args, target, writable: flags[:rw_git])
+    bind_rw_mount!(args, target, git_writable: flags[:git_rw])
   end
 end
 
@@ -499,6 +608,17 @@ end
 args.push(*ro(password_store), *ro(gnupg_dir), *ro(gpg_agent_dir))
 
 # --- Project-specific extra mounts (.sandbox-mounts) ---
+
+# .sandbox-mounts sits in the project dir, which the agent can write to — so an
+# agent could grant itself, on the next launch, exactly what the header says we
+# never grant. Refuse those paths here.
+forbidden_mounts = [
+  "#{home}/.ssh",                     # private keys
+  "/run/user/#{Process.uid}/keyring", # gnome-keyring: secrets + ssh agent
+  "/run/user/#{Process.uid}/bus",     # session D-Bus: KWallet / Secret Service
+  "#{home}/.config/herdr",            # herdr.sock: starts panes on the HOST
+]
+
 extra_path_dirs = []
 sandbox_mounts = File.join(project_dir, ".sandbox-mounts")
 if File.exist?(sandbox_mounts)
@@ -509,14 +629,32 @@ if File.exist?(sandbox_mounts)
     mode, path = line.split(":", 2)
     path = path.strip
     path = File.expand_path(path)
+    if forbidden_mounts.any? { |denied| path == denied || path.start_with?("#{denied}/") }
+      warn "Refusing forbidden mount in .sandbox-mounts: #{line}"
+      next
+    end
     case mode
     when "ro"   then args.push(*ro(path)) if File.exist?(path)
-    when "rw"   then args.push(*rw(path)) if File.exist?(path)
+    when "rw"   then bind_rw_mount!(args, path, git_writable: flags[:git_rw]) if File.exist?(path)
     when "path" then extra_path_dirs << path
     else warn "Unknown mount mode '#{mode}' in .sandbox-mounts: #{line}"
     end
   end
 end
+
+# --- no SSH, last word ---
+#
+# gpg-agent doubles as an ssh agent, and its socket dir has to be mounted for
+# commit signing / pass — so mask that one socket. The client binaries go too:
+# with no keys and no agent they are already toothless, but masking them keeps
+# the rule simple (there is no ssh in here). /bin and /usr/bin are bound
+# separately above, hence both paths. Placed after .sandbox-mounts on purpose:
+# in bwrap the last mount wins, so nothing above can undo this.
+ssh_masks = %w[ssh scp sftp ssh-add ssh-agent ssh-keygen ssh-keyscan].flat_map do |name|
+  %w[/usr/bin /bin /usr/local/bin].map { |dir| File.join(dir, name) }
+end
+ssh_masks << "#{gpg_agent_dir}/S.gpg-agent.ssh"
+ssh_masks.each { |path| args.push(*mask(path)) if File.exist?(path) }
 
 args.push("--unshare-pid", "--die-with-parent", "--chdir", project_dir)
 
@@ -544,45 +682,116 @@ args.push("--clearenv",
           "--setenv", "TERM", term,
           "--setenv", "COLORTERM", colorterm,
           "--setenv", "LANG", lang,
-          *(!flags[:rw_git] ? ["--setenv", "GIT_OPTIONAL_LOCKS", "0"] : []),
+          *(ENV["EDITOR"] ? ["--setenv", "EDITOR", ENV["EDITOR"]] : []),
+          *(!flags[:git_rw] ? ["--setenv", "GIT_OPTIONAL_LOCKS", "0"] : []),
           *(ENV["DISPLAY"] ? ["--setenv", "DISPLAY", ENV["DISPLAY"]] : []),
-          *(ENV["DBUS_SESSION_BUS_ADDRESS"] ? ["--setenv", "DBUS_SESSION_BUS_ADDRESS", ENV["DBUS_SESSION_BUS_ADDRESS"]] : []),
+          *(xauthority ? ["--setenv", "XAUTHORITY", xauthority] : []),
           *(ENV["DISABLE_AUTO_COMPACT"] ? ["--setenv", "DISABLE_AUTO_COMPACT", "1"] : []),
           *(ENV["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] ? ["--setenv", "CLAUDE_CODE_DISABLE_AUTO_MEMORY", ENV["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]] : []),
           *(ENV["XDG_RUNTIME_DIR"] ? ["--setenv", "XDG_RUNTIME_DIR", ENV["XDG_RUNTIME_DIR"]] : []),
           *(ENV["ASDF_DATA_DIR"] ? ["--setenv", "ASDF_DATA_DIR", ENV["ASDF_DATA_DIR"]] : []),
           *(ENV["GROK_HOME"] ? ["--setenv", "GROK_HOME", ENV["GROK_HOME"]] : []),
-          # Desktop-environment hints. Electron/Chromium apps (VS Code, Devin)
-          # read these to pick the OS keyring backend for safeStorage; without
-          # them they can't detect GNOME and fall back to plaintext encryption,
-          # which can't decrypt host-stored login tokens (you appear logged out).
-          *(ENV["XDG_CURRENT_DESKTOP"] ? ["--setenv", "XDG_CURRENT_DESKTOP", ENV["XDG_CURRENT_DESKTOP"]] : []),
-          *(ENV["XDG_SESSION_TYPE"] ? ["--setenv", "XDG_SESSION_TYPE", ENV["XDG_SESSION_TYPE"]] : []),
-          *(ENV["DESKTOP_SESSION"] ? ["--setenv", "DESKTOP_SESSION", ENV["DESKTOP_SESSION"]] : []),
+          *(ENV["PRIME_AGENT_CODING_AGENT_DIR"] ? ["--setenv", "PRIME_AGENT_CODING_AGENT_DIR", ENV["PRIME_AGENT_CODING_AGENT_DIR"]] : []),
           *(ENV["GH_TOKEN"] ? ["--setenv", "GH_TOKEN", ENV["GH_TOKEN"]] : []))
 
-# --- sandboxed tmux server ---
+# --- sandboxed multiplexer server ---
+#
+# Whichever multiplexer runs, it gets a private server whose socket lives in
+# socket_dir. That is not tidiness: a multiplexer server socket is a remote
+# control for starting processes, so an agent that reaches the *host* server
+# escapes the sandbox through it. tmux is confined via TMUX_TMPDIR, herdr via
+# HERDR_SOCKET_PATH; both host sockets are additionally out of reach because
+# $HOME is a tmpfs and neither /tmp nor ~/.config/herdr is mounted through.
 
 socket_dir = Dir.mktmpdir("sandbox-agent-")
-at_exit { FileUtils.rm_rf(socket_dir) }
+args.push(*rw(socket_dir))
 
-args.push(*rw(socket_dir), "--setenv", "TMUX_TMPDIR", socket_dir)
+case flags[:mux]
+when "tmux"
+  # tmux never puts its socket directly in TMUX_TMPDIR — it creates a
+  # tmux-<uid>/ subdirectory first. Spelling that out here keeps the attach
+  # hint below copy-pasteable (the uid is unchanged inside the sandbox: we
+  # unshare pid, not user).
+  mux_socket = File.join(socket_dir, "tmux-#{Process.uid}", "default")
+  attach_hint = "tmux -S #{mux_socket} attach"
 
-warn "Sandbox tmux socket: #{socket_dir}/default"
-warn "Attach from another terminal:  tmux -S #{socket_dir}/default attach"
+  args.push("--setenv", "TMUX_TMPDIR", socket_dir)
+
+  cmd = [
+    "tmux", "-f", "/dev/null",
+    "set", "-g", "default-terminal", "tmux-256color", ";",
+    "set", "-g", "extended-keys", "on", ";",
+    "set", "-g", "prefix", "C-o", ";",
+    "bind", "C-o", "send-prefix", ";",
+    "bind", "-n", "M-left", "prev", ";",
+    "bind", "-n", "M-right", "next", ";",
+    "new-session", "-s", "sandbox", ";",
+    "send-keys", cmd.shelljoin, "Enter",
+  ]
+
+when "herdr"
+  mux_socket = File.join(socket_dir, "herdr.sock")
+  attach_hint = "HERDR_SOCKET_PATH=#{mux_socket} herdr"
+
+  # herdr runs default_shell for every new pane and takes no per-pane command,
+  # so the agent is launched through a shim instead. First pane gets the agent
+  # (what tmux's send-keys does); later panes get a plain shell, so a pane you
+  # open to look around stays a shell rather than starting a second agent.
+  launcher = File.join(socket_dir, "launch")
+  File.write(launcher, <<~SH)
+    #!/bin/sh
+    if [ -e "#{socket_dir}/.launched" ]; then
+      exec "${SHELL:-/bin/sh}"
+    fi
+    : > "#{socket_dir}/.launched"
+    exec #{cmd.shelljoin}
+  SH
+  FileUtils.chmod(0o755, launcher)
+
+  # There is no `herdr -f <file>` to match `tmux -f /dev/null`, so settings
+  # arrive as a config bind-mounted over the path herdr reads. It is generated
+  # rather than copied from the host precisely so ~/.config/herdr — which holds
+  # the host server's socket — never has to be mounted.
+  config = File.join(socket_dir, "config.toml")
+  File.write(config, <<~TOML)
+    onboarding = false
+    [keys]
+    prefix = "ctrl+o"
+    [terminal]
+    default_shell = "#{launcher}"
+  TOML
+
+  args.push(*ro(config, "#{home}/.config/herdr/config.toml"),
+            "--setenv", "HERDR_SOCKET_PATH", mux_socket,
+            "--setenv", "HERDR_CLIENT_SOCKET_PATH", File.join(socket_dir, "herdr-client.sock"))
+
+  cmd = ["herdr"]
+end
+
+warn "Sandbox #{flags[:mux]} socket: #{mux_socket}"
+warn "Attach from another terminal:  #{attach_hint}"
 warn "---"
 
-cmd = [
-  "tmux", "-f", "/dev/null",
-  "set", "-g", "default-terminal", "tmux-256color", ";",
-  "set", "-g", "extended-keys", "on", ";",
-  "set", "-g", "prefix", "C-o", ";",
-  "bind", "C-o", "send-prefix", ";",
-  "bind", "-n", "M-left", "prev", ";",
-  "bind", "-n", "M-right", "next", ";",
-  "new-session", "-s", "sandbox", ";",
-  "send-keys", cmd.shelljoin, "Enter",
-]
-
 args.push("--", *cmd)
-exec("bwrap", *args)
+
+# Run bwrap as a child instead of exec()ing it. exec() replaces this process
+# image, so no at_exit/ensure hook ever fires and socket_dir — along with the
+# live tmux socket inside it — is left behind in /tmp on every single launch.
+# /tmp is a tmpfs on most desktops, so those leftovers are resident memory.
+#
+# Staying alive as a thin parent costs one process and buys reliable cleanup.
+# Ctrl-C already reaches bwrap on its own (same foreground process group), so
+# ignore SIGINT here rather than racing the child to the exit — we only need to
+# outlive it. SIGTERM is forwarded so `kill <sandbox-agent>` still tears down.
+status = nil
+begin
+  pid = spawn("bwrap", *args)
+  trap("INT", "IGNORE")
+  trap("TERM") { Process.kill("TERM", pid) rescue nil }
+  _, status = Process.waitpid2(pid)
+ensure
+  # Only ever the directory we created above, never a glob.
+  FileUtils.remove_entry(socket_dir) if File.directory?(socket_dir)
+end
+
+exit(status.exitstatus || (status.termsig ? 128 + status.termsig : 1))
