@@ -1,4 +1,0 @@
-interface:
-  display_name: "Browser Tools"
-  short_description: "Drive a real Chrome over CDP to inspect the running app"
-  default_prompt: "Use $browser-tools to inspect or interact with the running local app through the repository's CDP scripts, bootstrapping npm deps and Chrome yourself instead of asking."

@@ -86,8 +86,7 @@ convergence round requires human approval by default, so RED and GREEN can be
 inspected and redirected before the next responsibility is dispatched. During
 the session, the coordinator tracks evidence about each model's behavior in each
 role; the final recap compares strengths, failures, thinking levels, and
-confidence without overgeneralizing from a small sample. The older cross-CLI
-tmux workflow remains a separate global `rotating-tdd-tmux` skill.
+confidence without overgeneralizing from a small sample.
 
 ## Constraints
 

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Knowledge Enrich"
-  short_description: "Explore and expand knowledge"
-  default_prompt: "Use $knowledge-enrich to explore this codebase and propose one _knowledge addition at a time."

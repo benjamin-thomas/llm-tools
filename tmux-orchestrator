@@ -1,9 +1,0 @@
-#!/usr/bin/env python3
-import os
-import sys
-
-os.environ.setdefault("TMUX_ORCHESTRATOR_ENTRYPOINT", sys.argv[0])
-
-from tmux_orchestrator import main
-
-raise SystemExit(main())

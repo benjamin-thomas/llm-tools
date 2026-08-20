@@ -1,7 +1,5 @@
 {
   "include": [
-    "tmux_orchestrator.py",
-    "llm_skills.py",
     "dictate.py",
     "tts.py",
     "read_aloud_web.py",
