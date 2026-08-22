@@ -35,7 +35,7 @@ require "optparse"
 require "shellwords"
 require "tmpdir"
 
-flags = { git_rw: false, mux: "tmux" }
+flags = { git_rw: false, mux: "herdr" }
 
 def detect_opam_switch
   config = File.expand_path("~/.opam/config")
@@ -98,8 +98,8 @@ parser = OptionParser.new do |opts|
   opts.separator ""
 
   opts.on("--git-rw", "Allow writing to .git (default: read-only)") { flags[:git_rw] = true }
-  opts.on("--mux MUX", %w[tmux herdr],
-          "Multiplexer for the sandboxed session: tmux (default) or herdr") { |mux| flags[:mux] = mux }
+  opts.on("--mux MUX", %w[herdr tmux],
+          "Multiplexer for the sandboxed session: herdr (default) or tmux") { |mux| flags[:mux] = mux }
   opts.separator ""
   opts.separator "Never available inside the sandbox, by design (see the header comment"
   opts.separator "before re-adding any of it):"
@@ -111,17 +111,20 @@ parser = OptionParser.new do |opts|
   opts.separator "panes stay confined. Ctrl-o is the prefix either way (with tmux,"
   opts.separator "Alt-left/right switch windows)."
   opts.separator ""
-  opts.separator "--mux herdr swaps tmux for herdr, which shows per-pane agent state"
-  opts.separator "(working / idle / blocked). Its server is reached over a socket that can"
-  opts.separator "start processes for whoever holds it, so the sandbox gets a private one"
-  opts.separator "via HERDR_SOCKET_PATH and ~/.config/herdr is never mounted — handing an"
+  opts.separator "The default is herdr, which shows per-pane agent state (working /"
+  opts.separator "idle / blocked). Its server is reached over a socket that can start"
+  opts.separator "processes for whoever holds it, so the sandbox gets a private one via"
+  opts.separator "HERDR_SOCKET_PATH and ~/.config/herdr is never mounted — handing an"
   opts.separator "agent the host socket would be a full sandbox escape."
+  opts.separator ""
+  opts.separator "--mux tmux swaps herdr back for tmux — the multiplexer tmux-orchestrator"
+  opts.separator "below drives."
   opts.separator ""
   opts.separator "Examples:"
   opts.separator "  sandbox-agent . -- claude-yolo"
   opts.separator "  sandbox-agent /path/to/project -- codex-yolo"
   opts.separator ""
-  opts.separator "Multi-agent coordination (tmux-orchestrator):"
+  opts.separator "Multi-agent coordination (tmux-orchestrator, needs --mux tmux):"
   opts.separator "  Launch one agent per tmux window (Ctrl-o c opens a new window), then let"
   opts.separator "  one window act as coordinator and dispatch to / read the others by index"
   opts.separator "  (you never have to name windows):"
@@ -776,7 +779,7 @@ args.push("--", *cmd)
 
 # Run bwrap as a child instead of exec()ing it. exec() replaces this process
 # image, so no at_exit/ensure hook ever fires and socket_dir — along with the
-# live tmux socket inside it — is left behind in /tmp on every single launch.
+# live multiplexer socket inside it — is left behind in /tmp on every launch.
 # /tmp is a tmpfs on most desktops, so those leftovers are resident memory.
 #
 # Staying alive as a thin parent costs one process and buys reliable cleanup.
