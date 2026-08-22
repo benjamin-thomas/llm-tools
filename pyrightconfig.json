@@ -3,6 +3,7 @@
     "dictate.py",
     "tts.py",
     "read_aloud_web.py",
+    "token_recap",
     "tests"
   ],
   "pythonVersion": "3.10",
