@@ -755,11 +755,23 @@ when "herdr"
   # arrive as a config bind-mounted over the path herdr reads. It is generated
   # rather than copied from the host precisely so ~/.config/herdr — which holds
   # the host server's socket — never has to be mounted.
+  #
+  # herdr has no "last tab" action; last_pane is the closest built-in. It is a
+  # *global* back-and-forth, so returning to a pane in another tab brings that
+  # tab with it, and it takes over prefix+l (focus_pane_right) to sit where
+  # tmux keeps its last-window binding.
   config = File.join(socket_dir, "config.toml")
   File.write(config, <<~TOML)
     onboarding = false
     [keys]
     prefix = "ctrl+o"
+    previous_tab = "alt+left"
+    next_tab = "alt+right"
+    previous_agent = "alt+up"
+    next_agent = "alt+down"
+    previous_workspace = "alt+shift+up"
+    next_workspace = "alt+shift+down"
+    last_pane = "prefix+l"
     [terminal]
     default_shell = "#{launcher}"
   TOML
