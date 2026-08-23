@@ -23,6 +23,10 @@ def in_window(ts: datetime, start: datetime, end: datetime) -> bool:
     return start <= ts < end
 
 
+def as_str(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
 def as_int(value: Any) -> int:
     if value is None:
         return 0

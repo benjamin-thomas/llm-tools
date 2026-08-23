@@ -7,7 +7,7 @@ from typing import Any
 
 from token_recap.buckets import TokenBuckets
 from token_recap.native import claude_native_usd
-from token_recap.parse import as_int, in_window, parse_iso
+from token_recap.parse import as_int, as_str, in_window, parse_iso
 
 
 def collect_claude(root: Path, start: datetime, end: datetime) -> TokenBuckets:
@@ -43,13 +43,13 @@ def _read_claude_jsonl(
                 continue
             if obj.get("type") != "assistant":
                 continue
-            ts = parse_iso(str(obj.get("timestamp") or ""))
+            ts = parse_iso(as_str(obj.get("timestamp")))
             if ts is None or not in_window(ts, start, end):
                 continue
             msg = obj.get("message")
             if not isinstance(msg, dict):
                 continue
-            key = str(msg.get("id") or obj.get("requestId") or "")
+            key = as_str(msg.get("id")) or as_str(obj.get("requestId"))
             if not key or key in seen:
                 continue
             seen.add(key)
@@ -73,7 +73,7 @@ def _read_claude_jsonl(
             uncached = as_int(usage.get("input_tokens"))
             cache_read = as_int(usage.get("cache_read_input_tokens"))
             output = as_int(usage.get("output_tokens"))
-            model = str(msg.get("model") or "unknown")
+            model = as_str(msg.get("model")) or "unknown"
             buckets.add(
                 uncached=uncached,
                 cache_write=write,
