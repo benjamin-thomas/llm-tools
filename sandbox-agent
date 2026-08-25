@@ -760,6 +760,10 @@ when "herdr"
   # *global* back-and-forth, so returning to a pane in another tab brings that
   # tab with it, and it takes over prefix+l (focus_pane_right) to sit where
   # tmux keeps its last-window binding.
+  #
+  # A sandbox session is one workspace with a pane or two, so the sidebar is
+  # mostly listing what is already on screen: it starts collapsed, and
+  # prefix+b brings it back.
   config = File.join(socket_dir, "config.toml")
   File.write(config, <<~TOML)
     onboarding = false
@@ -772,6 +776,8 @@ when "herdr"
     previous_workspace = "alt+shift+up"
     next_workspace = "alt+shift+down"
     last_pane = "prefix+l"
+    [ui]
+    sidebar_start_collapsed = true
     [terminal]
     default_shell = "#{launcher}"
   TOML
