@@ -22,71 +22,44 @@
 #   XDG_CURRENT_DESKTOP / XDG_SESSION_TYPE / DESKTOP_SESSION: their only job
 #   was helping Electron apps find an OS keyring, i.e. the thing above.
 #
-# .sandbox-mounts cannot re-add them either (see forbidden_mounts) — that file
-# lives inside the project the agent can write to, so the check matters.
+# .sandbox-mounts cannot quietly re-add them: that file lives in the project the
+# agent can write, so it authorizes nothing by itself — it requests, and you
+# approve with `sandbox-agent allow`. See the "Mount approval" comment in
+# sandbox-lib.rb for why this is an approval step and not a denylist.
 #
 # Still granted, for the record: X11 (clipboard — note any X client can read
 # other windows' keystrokes), ~/.password-store + ~/.gnupg ro (commit signing),
 # ~/.cache rw, ~/.local ro, audio devices, the project dir rw.
 
 require "fileutils"
-require "open3"
 require "optparse"
 require "shellwords"
 require "tmpdir"
 
-flags = { git_rw: false, mux: "herdr" }
+# The mount set, the floor and the .sandbox-mounts contract live in the lib,
+# shared with run-orca-server. What is here is what only an interactive agent
+# session needs: the multiplexer, and the flags that drive it.
+require_relative "sandbox-lib"
 
-def detect_opam_switch
-  config = File.expand_path("~/.opam/config")
-  return nil unless File.exist?(config)
-  match = File.read(config).match(/^switch:\s*"([^"]+)"/)
-  match && match[1]
+# module_function also defines these as private instance methods, so the
+# multiplexer block below can keep calling ro/rw unqualified.
+include SandboxLib
+
+flags = { git_rw: nil, mux: "herdr", write: false, mounts: [], setenv: [] }
+
+# `doctor` is a subcommand, not a flag: it takes a project dir and no command.
+if (allow = ARGV.first == "allow")
+  ARGV.shift
+end
+if (doctor = ARGV.first == "doctor")
+  ARGV.shift
+  # `doctor <dir> --write` is the natural order to type, but OptionParser#order!
+  # stops at the first positional and would never see the flag. Take it out here
+  # so either order works; the parser entry below still handles the other one.
+  flags[:write] = true unless ARGV.delete("--write").nil?
 end
 
-# Locate a Chrome/Chromium install on the host so projects driving a browser
-# via CDP (e.g. puppeteer-core, playwright in connect mode) don't each need
-# to declare `ro:/opt/google/chrome` in `.sandbox-mounts`. Returns the install
-# dir to mount, or nil if no system Chrome/Chromium is found.
-def detect_chrome_install_dir
-  candidates = [
-    "/opt/google/chrome/google-chrome",
-    "/opt/google/chrome-stable/google-chrome",
-    "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-    "/snap/bin/chromium",
-  ]
-  candidates.each do |bin|
-    next unless File.exist?(bin) || File.symlink?(bin)
-    target = File.realpath(bin) rescue bin
-    dir = File.dirname(target)
-    return dir if File.directory?(dir)
-  end
-  nil
-end
-
-# Resolve the Go toolchain the caller's shell actually uses. Rather than hardcode
-# a GOROOT location (it varies a lot: /usr/local/go, distro /usr/bin, asdf, or a
-# JetBrains/golang.org-dl dir like ~/sdk/<version>), find the first `go` on PATH
-# and ask it for GOROOT/GOPATH, so the sandbox tracks the same version as the
-# shell launching it. Returns {root:, path:} or nil. (GOPATH may be a list — we
-# take the first entry, the one `go install` writes to.)
-def detect_go_paths
-  go = ENV["PATH"].to_s.split(File::PATH_SEPARATOR)
-                 .map { |dir| File.join(dir, "go") }
-                 .find { |p| File.file?(p) && File.executable?(p) }
-  return nil unless go
-
-  out, _err, status = Open3.capture3(go, "env", "GOROOT", "GOPATH")
-  return nil unless status.success?
-
-  root, path = out.lines(chomp: true)
-  { root: root, path: path.to_s.split(File::PATH_SEPARATOR).first }
-end
-
-opam_switch = detect_opam_switch
+opam_switch = SandboxLib.detect_opam_switch
 opam_path_line = opam_switch ? "path:~/.opam/#{opam_switch}/bin" : "path:~/.opam/<switch>/bin   # e.g. ~/.opam/5.3.0/bin"
 
 parser = OptionParser.new do |opts|
@@ -97,9 +70,39 @@ parser = OptionParser.new do |opts|
   opts.separator "else under $HOME."
   opts.separator ""
 
-  opts.on("--git-rw", "Allow writing to .git (default: read-only)") { flags[:git_rw] = true }
-  opts.on("--mux MUX", %w[herdr tmux],
-          "Multiplexer for the sandboxed session: herdr (default) or tmux") { |mux| flags[:mux] = mux }
+  opts.on("--git-rw", "Allow writing to .git (skips the prompt)") { flags[:git_rw] = true }
+  opts.on("--no-git-rw", "Keep .git read-only (skips the prompt). Pass this from",
+          "scripts that already asked, so the user is not asked twice") { flags[:git_rw] = false }
+  opts.on("--mux MUX", %w[herdr tmux none],
+          "Multiplexer for the sandboxed session: herdr (default), tmux, or",
+          "none (run the command directly — for servers whose stdout you parse)") do |mux|
+    flags[:mux] = mux
+    flags[:mux_explicit] = true
+  end
+  opts.on("--write", "doctor only: append the missing declarations it found") { flags[:write] = true }
+  # --mount/--setenv come from the command line, not from .sandbox-mounts, so
+  # they are the operator speaking rather than the project. That is the whole
+  # reason they exist as flags: a per-instance path (an Orca userData dir, say)
+  # has no business being declared in a file the sandboxed agent can edit. The
+  # floor still applies to --mount — it costs nothing and keeps one rule.
+  opts.on("--mount SPEC", "Extra mount, MODE:SRC or MODE:SRC:DEST (repeatable).",
+          "DEST relocates it inside the sandbox, e.g.",
+          "rw:~/.local/share/sandbox-orca/foo:~/.config/orca",
+          "For operator-supplied paths; projects use .sandbox-mounts") { |spec| flags[:mounts] << spec }
+  opts.on("--setenv PAIR", "Extra env var as KEY=VALUE (repeatable)") { |pair| flags[:setenv] << pair }
+
+  opts.separator ""
+  opts.separator "Subcommands:"
+  opts.separator "  sandbox-agent allow <project-dir>"
+  opts.separator "    Approve the project's .sandbox-mounts after reading it. Required"
+  opts.separator "    before a first launch, and again after any change to the file —"
+  opts.separator "    it lives in the project, so an agent can edit it."
+  opts.separator ""
+  opts.separator "  sandbox-agent doctor <project-dir> [--write]"
+  opts.separator "    Report what this project must declare in .sandbox-mounts before it"
+  opts.separator "    will run: symlinks that leave the project (which are never mounted"
+  opts.separator "    implicitly) plus advisory toolchain recipes. Exits 1 if anything is"
+  opts.separator "    undeclared, so it works as a pre-flight check."
   opts.separator ""
   opts.separator "Never available inside the sandbox, by design (see the header comment"
   opts.separator "before re-adding any of it):"
@@ -202,6 +205,7 @@ parser = OptionParser.new do |opts|
   opts.separator "path:~/.local/bin"
 end
 
+
 begin
   parser.order!
 rescue OptionParser::ParseError => e
@@ -209,493 +213,45 @@ rescue OptionParser::ParseError => e
 end
 project_dir = File.expand_path(ARGV.shift || abort(parser.help))
 ARGV.shift if ARGV.first == "--"
-abort "No command specified.\n\n#{parser.help}" if ARGV.empty?
+abort "No command specified.\n\n#{parser.help}" if ARGV.empty? && !doctor && !allow
 cmd = ARGV.dup
 
 # --- helpers ---
 
-def ro(src, dest = src) = ["--ro-bind", src, dest]
-def rw(src, dest = src) = ["--bind",    src, dest]
+exit SandboxLib.run_doctor(project_dir, ENV.fetch("HOME"), write: flags[:write]) if doctor
+exit SandboxLib.approve_mounts!(project_dir) if allow
 
-# Shadow a path that an earlier mount dragged in: bind /dev/null over it, so it
-# is still there but useless — exec fails, connect() fails (it is no longer a
-# socket). Later mounts win in bwrap, so masks must come after their mount.
-def mask(path) = ["--ro-bind", "/dev/null", path]
+# .sandbox-mounts is a request written by the project, not an authorization.
+SandboxLib.require_mounts_approval!(project_dir, "sandbox-agent")
 
-def require_dir!(path, label)
-  abort "#{label} not found: #{path}" unless File.directory?(path)
+# Asked rather than left to memory: the answer is needed before the sandbox
+# exists, and inside it the mount can no longer be changed. Same reasoning as
+# manage/session, which already asks. A caller that has already asked passes
+# --git-rw / --no-git-rw (or sets SANDBOX_AGENT_GIT_RW) so the user is not asked
+# twice.
+if flags[:git_rw].nil? && !ENV["SANDBOX_AGENT_GIT_RW"].nil?
+  flags[:git_rw] = %w[1 true yes y].include?(ENV["SANDBOX_AGENT_GIT_RW"].downcase)
 end
-
-def require_file!(path, label)
-  abort "#{label} not found: #{path}" unless File.exist?(path)
+if flags[:git_rw].nil?
+  flags[:git_rw] =
+    if $stdin.tty?
+      $stderr.print "Let this session write to .git? [y/N] "
+      %w[y yes].include?($stdin.gets.to_s.strip.downcase)
+    else
+      false
+    end
+  warn "Starting with .git read-only." unless flags[:git_rw]
 end
-
-def find_command_path(command, path_dirs)
-  return nil if command.nil? || command.empty?
-
-  if command.include?("/")
-    expanded = File.expand_path(command)
-    return expanded if File.exist?(expanded) || File.symlink?(expanded)
-    return nil
-  end
-
-  path_dirs.each do |dir|
-    candidate = File.join(dir, command)
-    return candidate if File.exist?(candidate) || File.symlink?(candidate)
-  end
-
-  nil
-end
-
-# Later mounts win in bwrap, so a ro bind added for a command's symlink target
-# would shadow a rw mount made earlier — e.g. ~/.grok holds both the `grok`
-# binary and the state it writes, likewise ~/.local/share/claude. Detect that.
-def bound_rw?(args, path)
-  args.each_index.any? do |i|
-    next false unless args[i] == "--bind"
-    src = args[i + 1]
-    path == src || path.start_with?("#{src}/")
-  end
-end
-
-def bind_command_symlink_target!(args, command, path_dirs)
-  command_path = find_command_path(command, path_dirs)
-  return unless command_path && File.symlink?(command_path)
-
-  target = File.realpath(command_path)
-  mount_path = File.directory?(target) ? target : File.dirname(target)
-  return unless File.directory?(mount_path)
-  return if bound_rw?(args, mount_path)
-
-  warn "Binding command symlink target: #{mount_path}"
-  args.push(*ro(mount_path))
-end
-
-def git_metadata_paths(repo_dir)
-  out, _err, status = Open3.capture3(
-    "git",
-    "-C",
-    repo_dir,
-    "rev-parse",
-    "--path-format=absolute",
-    "--git-dir",
-    "--git-common-dir"
-  )
-  return [] unless status.success?
-
-  paths = out.lines(chomp: true).reject(&:empty?)
-  git_file = File.join(repo_dir, ".git")
-  paths << git_file if File.exist?(git_file)
-  paths.uniq.select { |path| File.exist?(path) }
-end
-
-def bind_git_metadata!(args, repo_dir, writable:)
-  git_metadata_paths(repo_dir).each do |path|
-    args.push(*(writable ? rw(path) : ro(path)))
-  end
-end
-
-# The one way to grant write access to a directory: code writable, git history
-# read-only unless --git-rw. Guarded on the mount root being a repo root, so a
-# repo nested inside a mount (ruby-advisory-db under ~/.local/share, which
-# bundle-audit updates via git fetch) keeps the writable .git its tooling needs.
-def bind_rw_mount!(args, path, git_writable:)
-  args.push(*rw(path))
-  return unless File.exist?(File.join(path, ".git"))
-
-  bind_git_metadata!(args, path, writable: git_writable)
-end
-
-# --- detect paths ---
 
 home = ENV.fetch("HOME")
-term = ENV.fetch("TERM", "xterm-256color")
-
-nvm_bin        = ENV["NVM_BIN"] || `bash -c 'source #{home}/.nvm/nvm.sh 2>/dev/null && echo -n "$NVM_BIN"'`
-nvm_bin        = nil if nvm_bin.empty?
-gitconfig      = "#{home}/.gitconfig"
-gitignore      = "#{home}/.gitignore"
-password_store = "#{home}/.password-store"
-gnupg_dir      = "#{home}/.gnupg"
-gpg_agent_dir  = "/run/user/#{Process.uid}/gnupg"
-resolvconf_dir =
-  if    Dir.exist?("/run/resolvconf")       then "/run/resolvconf"
-  elsif Dir.exist?("/run/systemd/resolve")  then "/run/systemd/resolve"
-  else  abort "Cannot find DNS resolver directory (/run/resolvconf or /run/systemd/resolve)"
-  end
-
-# --- validate required paths ---
-
-require_dir!  project_dir,    "Project directory"
-require_file! gitconfig,      "Git config"
-require_dir!  password_store, "Password store (~/.password-store)"
-require_dir!  gnupg_dir,      "GnuPG directory (~/.gnupg)"
-require_dir!  gpg_agent_dir,  "GPG agent socket dir"
-require_dir!  resolvconf_dir, "DNS resolver"
-
-# --- build bwrap args ---
-
-args = []
-
-# System directories (read-only)
-args.push(*ro("/usr"), *ro("/lib"), *ro("/lib64"),
-          *ro("/bin"), *ro("/sbin"), *ro("/etc"))
-args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp")
-
-# Chrome (and a lot of other tooling) wants /dev/shm. bwrap's --dev mounts a
-# minimal devtmpfs without it, so add an explicit tmpfs.
-args.push("--tmpfs", "/dev/shm")
-
-# Auto-mount Chrome/Chromium install dir so projects can drive a CDP browser
-# without per-project .sandbox-mounts entries.
-chrome_dir = detect_chrome_install_dir
-args.push(*ro(chrome_dir)) if chrome_dir
-
-# X11 clipboard access
-x11_socket = "/tmp/.X11-unix"
-args.push(*ro(x11_socket)) if File.directory?(x11_socket)
-xauthority = ENV["XAUTHORITY"]&.then { |path| File.expand_path(path) }
-xauthority = nil unless xauthority && File.file?(xauthority)
-args.push(*ro(xauthority)) if xauthority
-
-# IDE connection sockets
-claude_ipc = "/tmp/claude-#{Process.uid}"
-args.push(*rw(claude_ipc)) if File.directory?(claude_ipc)
-
-# DNS
-args.push(*ro(resolvconf_dir))
-
-# Audio devices for OMP live/STT and direct-ALSA speech/dictation.
-# Must be --dev-bind: a plain --bind/--ro-bind mounts the nodes nodev, so every
-# open() of /dev/snd/control* fails and ALSA reports "no soundcards found"
-# (`arecord -l` empty, hw:/plughw: devices unusable). Only matters for the
-# direct-ALSA path — capture through the sound server below needs no device.
-snd_dir = "/dev/snd"
-args.push("--dev-bind", snd_dir, snd_dir) if File.directory?(snd_dir)
-
-# PulseAudio / PipeWire sockets. OMP's native Linux voice backend prefers
-# PulseAudio and falls back to ALSA; recorder CLIs use these sockets too.
-pulse_dir       = "/run/user/#{Process.uid}/pulse"
-pipewire_socket = "/run/user/#{Process.uid}/pipewire-0"
-args.push(*ro(pulse_dir))       if File.directory?(pulse_dir)
-args.push(*ro(pipewire_socket)) if File.exist?(pipewire_socket)
-
-# No D-Bus session socket and no keyring dir: both are the Secret Service (and
-# the keyring dir also holds an ssh agent). See the header — do not re-add.
-
-# Home: tmpfs overlay, then selective mounts
-args.push("--tmpfs", home)
-args.push(*ro(gitconfig))
-args.push(*ro(gitignore)) if File.exist?(gitignore)
-
-# Agent config/data directories
-local_dir = "#{home}/.local"
-claude_dir = "#{home}/.claude"
-claude_json = "#{home}/.claude.json"
-codex_dir   = "#{home}/.codex"
-args.push(*ro(local_dir))    if File.directory?(local_dir)
-args.push(*rw(claude_dir))   if File.directory?(claude_dir)
-args.push(*rw(claude_json))  if File.exist?(claude_json)
-# Native Claude Code install: runtime state/lock + versioned binaries live under
-# ~/.local, which is mounted read-only above. Overlay these subtrees rw so the
-# native `claude` binary can take its launch lock and self-manage versions.
-claude_state_dir = "#{home}/.local/state/claude"
-claude_share_dir = "#{home}/.local/share/claude"
-args.push(*rw(claude_state_dir)) if File.directory?(claude_state_dir)
-args.push(*rw(claude_share_dir)) if File.directory?(claude_share_dir)
-args.push(*rw(codex_dir))    if File.directory?(codex_dir)
-# Kimi Code: ~/.kimi-code holds the binary plus OAuth locks, sessions and logs
-# (all written at runtime — rw), ~/.kimi holds config/credentials (rw),
-# ~/.config/kimi holds user agents (rw).
-kimi_dir        = "#{home}/.kimi"
-kimi_config_dir = "#{home}/.config/kimi"
-kimi_code_dir   = "#{home}/.kimi-code"
-args.push(*rw(kimi_dir))        if File.directory?(kimi_dir)
-args.push(*rw(kimi_config_dir)) if File.directory?(kimi_config_dir)
-args.push(*rw(kimi_code_dir))   if File.directory?(kimi_code_dir)
-# Kimi user skills live in ~/.agents/skills as symlinks into this repo's
-# global-skills. Mount rw, not ro: llm-skills install/import manage those links,
-# and skills are curated from inside a sandbox session. ~/.claude and ~/.codex
-# are already rw above, so a ro mount here made kimi the one CLI whose skills
-# could not be installed without leaving the sandbox (EROFS on symlink create).
-# Pairs with the rw global-skills overlay below — editing a skill needs the
-# content writable, (re)installing one needs the link directory writable.
-agents_dir = "#{home}/.agents"
-args.push(*rw(agents_dir)) if File.directory?(agents_dir)
-opencode_cfg = "#{home}/.config/opencode"
-opencode_data = "#{home}/.local/share/opencode"
-# ~/.local/state/opencode holds runtime locks/state and falls under the ro
-# ~/.local mount above — overlay it rw or opencode crashes with EROFS trying to
-# create its lock files (mkdir .../locks/<hash>.lock).
-opencode_state = "#{home}/.local/state/opencode"
-args.push(*rw(opencode_cfg))   if File.directory?(opencode_cfg)
-args.push(*rw(opencode_data))  if File.directory?(opencode_data)
-args.push(*rw(opencode_state)) if File.directory?(opencode_state)
-# pi: ~/.pi holds config/auth plus runtime state (sessions, logs), all written
-# at runtime — mount rw. pi is yolo by default.
-pi_dir = "#{home}/.pi"
-args.push(*rw(pi_dir)) if File.directory?(pi_dir)
-# Oh My Pi: ~/.omp holds config/auth plus runtime-written sessions, logs,
-# caches, extracted native addons, and daemon/browser state.
-omp_dir = "#{home}/.omp"
-args.push(*rw(omp_dir)) if File.directory?(omp_dir)
-
-# Prime Agent — a pi fork, so the same shape one directory over. ~/.prime/agent
-# is the config dir (auth.json, models.json, settings.json, keybindings.json)
-# and also holds everything written at runtime: sessions, session-leases,
-# session-artifacts, daemon-workers, logs, plus kernel-venv, the Python venv it
-# bootstraps for its IPython tool. ~/.prime/supervisor-owners sits one level up
-# (the daemon ownership registry), so bind the whole tree rw rather than just
-# the agent dir. PRIME_AGENT_CODING_AGENT_DIR relocates the agent dir; honour it
-# like GROK_HOME/ASDF_DATA_DIR are honoured, and pass it through below.
-prime_dir = "#{home}/.prime"
-args.push(*rw(prime_dir)) if File.directory?(prime_dir)
-prime_agent_dir = ENV["PRIME_AGENT_CODING_AGENT_DIR"]&.then { |d| File.expand_path(d) }
-args.push(*rw(prime_agent_dir)) if prime_agent_dir && File.directory?(prime_agent_dir)
-# Note what is deliberately NOT reachable here: prime-agent's daemon socket is
-# $TMPDIR/prime-agent-<uid>/daemon.sock, and that socket starts agent processes
-# for whoever holds it — the same escape the mux sockets below guard against.
-# The sandbox gets its own because /tmp is a tmpfs and TMPDIR is not passed
-# through, so the host daemon is simply not there. Mounting /tmp (or exporting
-# TMPDIR) would hand a sandboxed agent the host's daemon; don't.
-#
-# A private socket is only half of it. prime-agent runs its agents in a daemon
-# and tracks that daemon in three directories under ~/.prime, by raw PID and by
-# socket path — both of which are namespace-local here, since the sandbox has
-# its own PID namespace (--unshare-pid, below) and its own /tmp. Leave them
-# shared and a sandboxed daemon overwrites the *host's* bookkeeping with numbers
-# that mean nothing outside the sandbox:
-#
-#   supervisor-owners/    the daemon ownership registry. A sandbox claiming it
-#                         orphans the host's live supervisor, which then fails
-#                         every launch with "no longer owns its registry entry".
-#   agent/daemon-workers/ per-worker descriptors, likewise pid-keyed.
-#   agent/session-leases/ who currently holds a session. Worst of the three: a
-#                         namespaced pid can *alias a live host process* (a
-#                         leftover lease for "pid 124" matched a kernel thread),
-#                         so the staleness check never fires and the session
-#                         stays locked forever.
-#
-# One private tmpfs each fixes both directions at once — the host is protected,
-# and any number of sandboxes get fully independent daemons. Everything worth
-# sharing still is: auth.json, models.json, settings.json, keybindings.json,
-# sessions/, session-artifacts/ and the (expensive) kernel venv.
-%w[supervisor-owners agent/daemon-workers agent/session-leases].each do |sub|
-  args.push("--tmpfs", "#{prime_dir}/#{sub}")
-end
-
-# grok (xAI): everything lives under one dir (GROK_HOME, default ~/.grok) — the
-# binary itself (~/.local/bin/grok symlinks into downloads/), config.toml,
-# auth.json, plus lock files, sessions, logs and worktrees.db written at
-# runtime. Mount rw. Its bin/ goes on PATH below so `grok` resolves even when
-# the ~/.local/bin symlink is absent.
-grok_dir = ENV["GROK_HOME"]&.then { |d| File.expand_path(d) } || "#{home}/.grok"
-args.push(*rw(grok_dir)) if File.directory?(grok_dir)
-
-# VS Code / Devin Desktop (Electron IDEs). The binaries resolve under
-# /usr/share (already mounted ro), so only the per-user state under $HOME
-# needs binding — and rw, since Electron writes caches, lock files and
-# state DBs continuously. VS Code keeps user data in ~/.config/Code and
-# extensions in ~/.vscode; Devin (a VS Code fork) mirrors this with
-# ~/.config/Devin + ~/.devin, plus a small ~/.config/devin (cli/config).
-vscode_config = "#{home}/.config/Code"
-vscode_exts   = "#{home}/.vscode"
-devin_config  = "#{home}/.config/Devin"
-devin_cli     = "#{home}/.config/devin"
-devin_exts    = "#{home}/.devin"
-args.push(*rw(vscode_config)) if File.directory?(vscode_config)
-args.push(*rw(vscode_exts))   if File.directory?(vscode_exts)
-args.push(*rw(devin_config))  if File.directory?(devin_config)
-args.push(*rw(devin_cli))     if File.directory?(devin_cli)
-args.push(*rw(devin_exts))    if File.directory?(devin_exts)
-# Devin's agent backend ("devin acp", a Rust binary from the windsurf/codeium
-# stack) keeps state outside ~/.config/Devin: logs + sessions.db live under
-# ~/.local/share/devin, which falls under the ro ~/.local mount above — overlay
-# it rw or the binary panics with ReadOnlyFilesystem creating its rolling log.
-# ~/.codeium holds the matching codeium/windsurf auth + state.
-devin_share = "#{home}/.local/share/devin"
-codeium_dir = "#{home}/.codeium"
-args.push(*rw(devin_share)) if File.directory?(devin_share)
-args.push(*rw(codeium_dir)) if File.directory?(codeium_dir)
-
-# MoonBit toolchain (~/.moon): the IDE spawns ~/.moon/bin/moon-lsp by absolute
-# path, and `moon` writes build/registry caches here, so mount rw (like cargo).
-# Its bin/ is added to PATH below so the moon CLI and the tools it shells out
-# to (moonc, moonfmt, ...) resolve in the sandbox terminal too.
-moon_dir = "#{home}/.moon"
-args.push(*rw(moon_dir)) if File.directory?(moon_dir)
-
-# asdf version manager. The `asdf` binary lives in ~/.local/bin (already on
-# PATH), but its data dir (ASDF_DATA_DIR, default ~/.asdf) holds the plugins,
-# installs, shims and downloads — hidden by the tmpfs home. Mount it rw (asdf
-# writes downloads/, installs/, tmp/), add its shims/ to PATH below, and pass
-# ASDF_DATA_DIR through so a non-default location is honoured.
-asdf_dir = ENV["ASDF_DATA_DIR"]&.then { |d| File.expand_path(d) } || "#{home}/.asdf"
-args.push(*rw(asdf_dir)) if File.directory?(asdf_dir)
-
-# Go toolchain + GOPATH, tracking whatever `go` is on the caller's PATH (see
-# detect_go_paths). GOROOT is mounted ro; GOPATH rw (module cache + 'go install'
-# bins). Both bin dirs go on PATH below. GOCACHE (~/.cache/go-build) is already
-# covered by the ~/.cache mount.
-go_paths = detect_go_paths
-if go_paths
-  args.push(*ro(go_paths[:root])) if go_paths[:root] && File.directory?(go_paths[:root])
-  args.push(*rw(go_paths[:path])) if go_paths[:path] && File.directory?(go_paths[:path])
-end
-
-# bun: globally-installed CLIs (opencode, etc.) live under ~/.bun as standalone
-# binaries symlinked from ~/.bun/bin. Mount ro and add ~/.bun/bin to PATH below
-# so `bun`/`bunx` and bun-installed tools resolve (mirrors the nvm handling).
-bun_dir = "#{home}/.bun"
-args.push(*ro(bun_dir)) if File.directory?(bun_dir)
-
-# WakaTime: ~/.wakatime.cfg holds the api key (ro), ~/.wakatime holds the
-# bundled cli + offline-heartbeat db + internal cfg (rw — the cli writes here).
-wakatime_cfg = "#{home}/.wakatime.cfg"
-wakatime_dir = "#{home}/.wakatime"
-args.push(*ro(wakatime_cfg)) if File.exist?(wakatime_cfg)
-args.push(*rw(wakatime_dir)) if File.directory?(wakatime_dir)
-
-# The llm-tools repo backs a set of ~/.local/bin tools and CLI skills through
-# symlinks that resolve back into it: tmux-orchestrator (+ tmux_orchestrator.py),
-# llm-skills, and the per-CLI skills under ~/.claude/skills, ~/.codex/skills,
-# ~/.agents/skills, etc. Mount the repo root ro so those symlinks resolve inside
-# the sandbox AND the coordinator can invoke tmux-orchestrator at runtime.
-# Skipped when the sandboxed project already covers the repo (it is the repo, or
-# a parent/child of it) to avoid a conflicting double bind. global-skills is a
-# subpath, so the skill symlinks are covered by this single mount.
-llm_tools_root = "#{home}/code/github.com/benjamin-thomas/llm-tools"
-llm_tools_covered =
-  project_dir == llm_tools_root ||
-  project_dir.start_with?("#{llm_tools_root}/") ||
-  llm_tools_root.start_with?("#{project_dir}/")
-args.push(*ro(llm_tools_root)) if File.directory?(llm_tools_root) && !llm_tools_covered
-
-# global-skills stays writable even though the repo around it is ro: skills are
-# edited from inside a sandbox session, and a ro mount makes that impossible
-# without leaving the sandbox. Later mounts win in bwrap, so this rw bind
-# overlays the ro repo mount above. When the sandboxed project *is* llm-tools
-# the rw project mount below already covers it, hence the same guard.
-global_skills_dir = "#{llm_tools_root}/global-skills"
-if File.directory?(global_skills_dir) && !llm_tools_covered
-  args.push(*rw(global_skills_dir))
-end
-
-cache_dir = "#{home}/.cache"
-args.push(*rw(cache_dir))    if File.directory?(cache_dir)
-pictures_dir = "#{home}/Pictures"
-args.push(*ro(pictures_dir)) if File.directory?(pictures_dir)
-args.push(*rw(project_dir))
-bind_git_metadata!(args, project_dir, writable: flags[:git_rw])
-
-# Bind-mount symlink targets so relative symlinks work
-Dir.children(project_dir).each do |name|
-  full = File.join(project_dir, name)
-  next unless File.symlink?(full)
-
-  target = File.realpath(full)
-  next if target.start_with?(project_dir + "/") # already inside project dir
-
-  if File.directory?(target)
-    warn "Binding symlink target: #{target}"
-    bind_rw_mount!(args, target, git_writable: flags[:git_rw])
-  end
-end
-
-# nvm (current Node version)
-if nvm_bin
-  nvm_node_dir = File.dirname(nvm_bin) # e.g. .nvm/versions/node/v22.19.0
-  args.push(*ro(nvm_node_dir)) if File.directory?(nvm_node_dir)
-end
-
-args.push(*ro(password_store), *ro(gnupg_dir), *ro(gpg_agent_dir))
-
-# --- Project-specific extra mounts (.sandbox-mounts) ---
-
-# .sandbox-mounts sits in the project dir, which the agent can write to — so an
-# agent could grant itself, on the next launch, exactly what the header says we
-# never grant. Refuse those paths here.
-forbidden_mounts = [
-  "#{home}/.ssh",                     # private keys
-  "/run/user/#{Process.uid}/keyring", # gnome-keyring: secrets + ssh agent
-  "/run/user/#{Process.uid}/bus",     # session D-Bus: KWallet / Secret Service
-  "#{home}/.config/herdr",            # herdr.sock: starts panes on the HOST
-]
-
-extra_path_dirs = []
-sandbox_mounts = File.join(project_dir, ".sandbox-mounts")
-if File.exist?(sandbox_mounts)
-  File.readlines(sandbox_mounts).each do |line|
-    line = line.strip
-    next if line.empty? || line.start_with?("#")
-    line = line.sub(/\s+#.*\z/, "") # strip inline comments (recipes are copy-paste ready)
-    mode, path = line.split(":", 2)
-    path = path.strip
-    path = File.expand_path(path)
-    if forbidden_mounts.any? { |denied| path == denied || path.start_with?("#{denied}/") }
-      warn "Refusing forbidden mount in .sandbox-mounts: #{line}"
-      next
-    end
-    case mode
-    when "ro"   then args.push(*ro(path)) if File.exist?(path)
-    when "rw"   then bind_rw_mount!(args, path, git_writable: flags[:git_rw]) if File.exist?(path)
-    when "path" then extra_path_dirs << path
-    else warn "Unknown mount mode '#{mode}' in .sandbox-mounts: #{line}"
-    end
-  end
-end
-
-# --- no SSH, last word ---
-#
-# gpg-agent doubles as an ssh agent, and its socket dir has to be mounted for
-# commit signing / pass — so mask that one socket. The client binaries go too:
-# with no keys and no agent they are already toothless, but masking them keeps
-# the rule simple (there is no ssh in here). /bin and /usr/bin are bound
-# separately above, hence both paths. Placed after .sandbox-mounts on purpose:
-# in bwrap the last mount wins, so nothing above can undo this.
-ssh_masks = %w[ssh scp sftp ssh-add ssh-agent ssh-keygen ssh-keyscan].flat_map do |name|
-  %w[/usr/bin /bin /usr/local/bin].map { |dir| File.join(dir, name) }
-end
-ssh_masks << "#{gpg_agent_dir}/S.gpg-agent.ssh"
-ssh_masks.each { |path| args.push(*mask(path)) if File.exist?(path) }
-
-args.push("--unshare-pid", "--die-with-parent", "--chdir", project_dir)
-
-colorterm = ENV.fetch("COLORTERM", "truecolor")
-lang      = ENV.fetch("LANG", "en_US.UTF-8")
-
-path_dirs = [
-  "#{home}/.local/bin",
-  *extra_path_dirs,
-  *(nvm_bin ? [nvm_bin] : []),
-  *(File.directory?(moon_dir) ? ["#{moon_dir}/bin"] : []),
-  *(File.directory?("#{kimi_code_dir}/bin") ? ["#{kimi_code_dir}/bin"] : []),
-  *(File.directory?("#{grok_dir}/bin") ? ["#{grok_dir}/bin"] : []),
-  *(File.directory?("#{asdf_dir}/shims") ? ["#{asdf_dir}/shims"] : []),
-  *(go_paths ? [go_paths[:root], go_paths[:path]].compact.map { |d| "#{d}/bin" } : []),
-  *(File.directory?("#{bun_dir}/bin") ? ["#{bun_dir}/bin"] : []),
-  "/usr/local/bin", "/usr/bin", "/bin",
-].compact
-
-bind_command_symlink_target!(args, cmd.first, path_dirs)
-
-args.push("--clearenv",
-          "--setenv", "HOME", home,
-          "--setenv", "PATH", path_dirs.join(":"),
-          "--setenv", "TERM", term,
-          "--setenv", "COLORTERM", colorterm,
-          "--setenv", "LANG", lang,
-          *(ENV["EDITOR"] ? ["--setenv", "EDITOR", ENV["EDITOR"]] : []),
-          *(!flags[:git_rw] ? ["--setenv", "GIT_OPTIONAL_LOCKS", "0"] : []),
-          *(ENV["DISPLAY"] ? ["--setenv", "DISPLAY", ENV["DISPLAY"]] : []),
-          *(xauthority ? ["--setenv", "XAUTHORITY", xauthority] : []),
-          *(ENV["DISABLE_AUTO_COMPACT"] ? ["--setenv", "DISABLE_AUTO_COMPACT", "1"] : []),
-          *(ENV["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] ? ["--setenv", "CLAUDE_CODE_DISABLE_AUTO_MEMORY", ENV["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]] : []),
-          *(ENV["XDG_RUNTIME_DIR"] ? ["--setenv", "XDG_RUNTIME_DIR", ENV["XDG_RUNTIME_DIR"]] : []),
-          *(ENV["ASDF_DATA_DIR"] ? ["--setenv", "ASDF_DATA_DIR", ENV["ASDF_DATA_DIR"]] : []),
-          *(ENV["GROK_HOME"] ? ["--setenv", "GROK_HOME", ENV["GROK_HOME"]] : []),
-          *(ENV["PRIME_AGENT_CODING_AGENT_DIR"] ? ["--setenv", "PRIME_AGENT_CODING_AGENT_DIR", ENV["PRIME_AGENT_CODING_AGENT_DIR"]] : []),
-          *(ENV["GH_TOKEN"] ? ["--setenv", "GH_TOKEN", ENV["GH_TOKEN"]] : []))
+args = SandboxLib.build_base_args(
+  project_dir,
+  git_rw: flags[:git_rw],
+  headless: false,          # interactive: keep X11 for the clipboard, and audio
+  command: cmd.first,
+  extra_mounts: flags[:mounts],
+  extra_env: flags[:setenv]
+)
 
 # --- sandboxed multiplexer server ---
 #
@@ -710,6 +266,13 @@ socket_dir = Dir.mktmpdir("sandbox-agent-")
 args.push(*rw(socket_dir))
 
 case flags[:mux]
+when "none"
+  # No multiplexer: run the command as-is so its stdout reaches our caller
+  # unmodified. This exists for long-lived servers whose startup JSON is parsed
+  # by a script — `orca serve --recipe-json` prints one pairing object and keeps
+  # serving, and a mux in the middle would swallow it. There is no host server
+  # to escape to here, so nothing is lost by leaving it out.
+
 when "tmux"
   # tmux never puts its socket directly in TMUX_TMPDIR — it creates a
   # tmux-<uid>/ subdirectory first. Spelling that out here keeps the attach
@@ -789,30 +352,12 @@ when "herdr"
   cmd = ["herdr"]
 end
 
-warn "Sandbox #{flags[:mux]} socket: #{mux_socket}"
-warn "Attach from another terminal:  #{attach_hint}"
-warn "---"
+if mux_socket
+  warn "Sandbox #{flags[:mux]} socket: #{mux_socket}"
+  warn "Attach from another terminal:  #{attach_hint}"
+  warn "---"
+end
 
 args.push("--", *cmd)
 
-# Run bwrap as a child instead of exec()ing it. exec() replaces this process
-# image, so no at_exit/ensure hook ever fires and socket_dir — along with the
-# live multiplexer socket inside it — is left behind in /tmp on every launch.
-# /tmp is a tmpfs on most desktops, so those leftovers are resident memory.
-#
-# Staying alive as a thin parent costs one process and buys reliable cleanup.
-# Ctrl-C already reaches bwrap on its own (same foreground process group), so
-# ignore SIGINT here rather than racing the child to the exit — we only need to
-# outlive it. SIGTERM is forwarded so `kill <sandbox-agent>` still tears down.
-status = nil
-begin
-  pid = spawn("bwrap", *args)
-  trap("INT", "IGNORE")
-  trap("TERM") { Process.kill("TERM", pid) rescue nil }
-  _, status = Process.waitpid2(pid)
-ensure
-  # Only ever the directory we created above, never a glob.
-  FileUtils.remove_entry(socket_dir) if File.directory?(socket_dir)
-end
-
-exit(status.exitstatus || (status.termsig ? 128 + status.termsig : 1))
+exit SandboxLib.spawn_sandbox(args, cleanup_dir: socket_dir)
