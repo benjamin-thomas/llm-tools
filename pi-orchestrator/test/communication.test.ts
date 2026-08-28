@@ -5,6 +5,7 @@ import {
   countUnreadResponses,
   dispatchToWorker,
   readWorkerMessages,
+  readWorkerMessagesWithRecovery,
   waitForWorker,
   type DispatchSession,
   type ReadSession,
@@ -164,4 +165,56 @@ test("read rejects a cursor that does not belong to the worker branch", () => {
   };
 
   assert.throws(() => readWorkerMessages(session, { after: "other-worker-entry" }), /Unknown worker message cursor/);
+});
+
+test("read recovers from a stale cursor by reading from the start of the branch", () => {
+  // Arrange: a native /new replaced the branch, so the old cursor no longer exists.
+  const session: ReadSession = {
+    sessionManager: {
+      getBranch: () => [
+        { type: "message", id: "fresh-u1", timestamp: "2026-01-02T00:00:00Z", message: { role: "user", content: "New task." } },
+        { type: "message", id: "fresh-a1", timestamp: "2026-01-02T00:00:01Z", message: { role: "assistant", content: "Done." } },
+      ],
+    },
+  };
+
+  // Act
+  const result = readWorkerMessagesWithRecovery(session, "stale-entry-id");
+
+  // Assert
+  assert.deepEqual(result, {
+    cursor: "fresh-a1",
+    messages: [
+      { id: "fresh-u1", timestamp: "2026-01-02T00:00:00Z", message: { role: "user", content: "New task." } },
+      { id: "fresh-a1", timestamp: "2026-01-02T00:00:01Z", message: { role: "assistant", content: "Done." } },
+    ],
+  });
+});
+
+test("read recovery on an empty branch returns no messages and a null cursor", () => {
+  const session: ReadSession = {
+    sessionManager: {
+      getBranch: () => [],
+    },
+  };
+
+  assert.deepEqual(readWorkerMessagesWithRecovery(session, "stale-entry-id"), {
+    cursor: null,
+    messages: [],
+  });
+});
+
+test("read recovery does not mask an invalid limit", () => {
+  const session: ReadSession = {
+    sessionManager: {
+      getBranch: () => [
+        { type: "message", id: "fresh-u1", timestamp: "2026-01-02T00:00:00Z", message: { role: "user", content: "New task." } },
+      ],
+    },
+  };
+
+  assert.throws(
+    () => readWorkerMessagesWithRecovery(session, "stale-entry-id", 101),
+    /Read limit must be between 1 and 100/,
+  );
 });

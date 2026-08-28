@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, type Model } from "@earendil-works/pi-ai";
 import { SelectList, type Component } from "@earendil-works/pi-tui";
 import { requestSerializedActivation, type ActivationQueue } from "./activation.js";
 import { assertSupportedPiVersion } from "./compatibility.js";
@@ -8,7 +8,7 @@ import {
   captureDispatchReceipt,
   countUnreadResponses,
   dispatchToWorker,
-  readWorkerMessages,
+  readWorkerMessagesWithRecovery,
   waitForWorker,
   type Delivery,
   type DispatchSession,
@@ -60,7 +60,7 @@ interface ParentTui {
   requestRender(force?: boolean): void;
 }
 
-interface SharedHost {
+export interface SharedHost {
   version: typeof SHARED_STATE_VERSION;
   active: boolean;
   focusedId: string;
@@ -131,6 +131,10 @@ function scopedSpec(model: Model<any>, thinkingLevel?: ThinkingLevel): ScopedMod
   return thinkingLevel === undefined
     ? { provider: model.provider, id: model.id }
     : { provider: model.provider, id: model.id, thinkingLevel };
+}
+
+export function reconcileThinkingLevelForModel(model: Model<any>, level: ThinkingLevel): ThinkingLevel {
+  return clampThinkingLevel(model, level);
 }
 
 export type PersistenceWriter = (customType: string, data: unknown) => void;
@@ -489,13 +493,11 @@ export function readLiveWorker(
 ) {
   assertCoordinatorContext(host, ctx);
   const worker = requireLiveWorker(host, workerId);
-  const effectiveOptions: { after?: string; limit?: number } = {};
   const after = options.after !== undefined ? options.after : worker.record.readCursor;
-  if (after !== null) effectiveOptions.after = after;
-  if (options.limit !== undefined) effectiveOptions.limit = options.limit;
-  const result = readWorkerMessages(
+  const result = readWorkerMessagesWithRecovery(
     worker.handle.runtime.session as unknown as ReadSession,
-    effectiveOptions,
+    after,
+    options.limit,
   );
   worker.record.readCursor = result.cursor;
   refreshUnread(worker);
@@ -679,10 +681,15 @@ export function updateActivity(host: SharedHost, ctx: ExtensionContext, activity
 export function updateModel(host: SharedHost, ctx: ExtensionContext, model: Model<any>): void {
   const ownerId = ownerIdForContext(host, ctx);
   const spec = scopedSpec(model);
-  if (ownerId === ORCHESTRATOR_ID && host.coordinator) host.coordinator.model = spec;
-  else {
+  if (ownerId === ORCHESTRATOR_ID && host.coordinator) {
+    host.coordinator.model = spec;
+    host.coordinator.thinkingLevel = reconcileThinkingLevelForModel(model, host.coordinator.thinkingLevel);
+  } else {
     const worker = host.workers.find(({ record }) => record.id === ownerId)?.record;
-    if (worker) worker.model = spec;
+    if (worker) {
+      worker.model = spec;
+      worker.thinkingLevel = reconcileThinkingLevelForModel(model, worker.thinkingLevel);
+    }
   }
   notify(host);
 }

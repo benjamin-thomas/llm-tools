@@ -113,6 +113,26 @@ export function readWorkerMessages(
   };
 }
 
+export function readWorkerMessagesWithRecovery(
+  session: ReadSession,
+  after: string | null,
+  limit?: number,
+): ReadWorkerResult {
+  const options: { after?: string; limit?: number } = {};
+  if (after !== null) options.after = after;
+  if (limit !== undefined) options.limit = limit;
+  try {
+    return readWorkerMessages(session, options);
+  } catch (error) {
+    const staleCursor = after !== null
+      && error instanceof Error
+      && error.message.startsWith("Unknown worker message cursor:");
+    if (!staleCursor) throw error;
+    // A native /new replaces the branch, invalidating old entry cursors.
+    return readWorkerMessages(session, options.limit !== undefined ? { limit: options.limit } : {});
+  }
+}
+
 export async function dispatchToWorker(
   session: DispatchSession,
   message: string,

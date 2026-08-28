@@ -90,7 +90,8 @@ export function resolveSpawnModels(
 }
 
 function modelDerivedName(model: ScopedModelSpec): string {
-  return validateWorkerName(model.id.split("/").filter(Boolean).at(-1) ?? model.id);
+  const raw = model.id.split("/").filter(Boolean).at(-1) ?? model.id;
+  return validateWorkerName(raw.replace(/[^A-Za-z0-9._-]/g, "-"));
 }
 
 export function uniqueModelName(workers: readonly WorkerRecord[], model: ScopedModelSpec): string {
