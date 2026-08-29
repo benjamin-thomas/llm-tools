@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Terminal } from "@earendil-works/pi-tui";
+import type { WorkerRecord } from "../src/types.js";
 import {
   getInteractiveModeAccess,
   stopWithoutTerminalEffects,
+  syncWorkerConfigurationFromSession,
   type InteractiveModeAccess,
 } from "../src/runtime.js";
 
@@ -39,6 +41,21 @@ function fakeAccess(terminal: Terminal): InteractiveModeAccess {
     stop() {},
   };
 }
+
+test("worker records use the model and thinking level accepted by the child session", () => {
+  const worker = {
+    model: { provider: "ollama", id: "requested" },
+    thinkingLevel: "medium",
+  } as WorkerRecord;
+
+  syncWorkerConfigurationFromSession(worker, {
+    model: { provider: "ollama", id: "actual" },
+    thinkingLevel: "off",
+  } as Parameters<typeof syncWorkerConfigurationFromSession>[1]);
+
+  assert.deepEqual(worker.model, { provider: "ollama", id: "actual" });
+  assert.equal(worker.thinkingLevel, "off");
+});
 
 test("the private InteractiveMode adapter validates the capabilities it uses", () => {
   const access = fakeAccess(recordingTerminal([]));

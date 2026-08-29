@@ -1,7 +1,7 @@
 ---
 name: rotating-tdd
 description: Coordinate native Pi workers through pi-orchestrator using flexible multi-model deliberation and strict rotating TDD cycles. Use when workers should research, test, implement, and review with human approval before each new assignment. Invoke only from the orchestrator session after /orchestrate.
-compatibility: Requires the pi-orchestrator package and an active /orchestrate session.
+compatibility: Requires the pi-orchestrator package and an active /orchestrate silo session.
 ---
 
 # Rotating TDD with Pi Orchestrator
@@ -40,10 +40,10 @@ to flexible deliberation. Do not improvise around an invalid cycle.
 
 ## Startup and the first checkpoint
 
-This skill is coordinator-only. If `/orchestrate` is not active, the typed
-`orchestrator` tool is missing, or this is a worker session, stop and tell the
-human what to do. Do not fall back to subprocesses or another orchestration
-system.
+This skill is coordinator-only and uses silo mode. If `/orchestrate silo` is
+not active, the typed `orchestrator` tool is missing, room mode is active, or
+this is a worker session, stop and tell the human what to do. Do not fall back
+to subprocesses or another orchestration system.
 
 Use `list` to inspect workers. Create missing **idle** workers when needed; merely
 creating an idle native session does not require approval because no assignment

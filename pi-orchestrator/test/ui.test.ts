@@ -16,6 +16,7 @@ test("a renamed worker displays its model and unread response badge", () => {
   // Arrange
   const snapshot: OrchestratorSnapshot = {
     active: true,
+    mode: "silo",
     focusedId: "worker-1",
     coordinator: {
       id: ORCHESTRATOR_ID,
@@ -73,6 +74,7 @@ test("the status widget wraps so every worker shortcut remains visible", () => {
   }));
   const snapshot: OrchestratorSnapshot = {
     active: true,
+    mode: "silo",
     focusedId: ORCHESTRATOR_ID,
     coordinator: {
       id: ORCHESTRATOR_ID,
@@ -100,6 +102,7 @@ test("the status widget wraps so every worker shortcut remains visible", () => {
 test("switcher digits target the orchestrator and stable worker slots", () => {
   const snapshot: OrchestratorSnapshot = {
     active: true,
+    mode: "silo",
     focusedId: ORCHESTRATOR_ID,
     workers: [
       {
@@ -140,6 +143,14 @@ test("switcher digits target the orchestrator and stable worker slots", () => {
   assert.equal(switchTargetForKey("1", snapshot), "worker-1");
   assert.equal(switchTargetForKey("3", snapshot), "worker-3");
   assert.equal(switchTargetForKey("2", snapshot), undefined);
+  const staleSnapshot = {
+    ...snapshot,
+    workers: [
+      ...snapshot.workers,
+      { ...snapshot.workers[0]!, id: "stopped-worker", slot: 6, key: "2", activity: "stopped" as const },
+    ],
+  };
+  assert.equal(switchTargetForKey("2", staleSnapshot), undefined);
   assert.equal(switchTargetForKey("x", snapshot), undefined);
   assert.equal(preferredSwitcherIndex(snapshot, "worker-3"), 2);
   assert.equal(preferredSwitcherIndex(snapshot, "closed-worker"), 1);

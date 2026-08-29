@@ -148,9 +148,14 @@ gates:
   cycle: always
 ```
 
-## Isolated Rooms
+## Isolated Rooms (Target Architecture)
 
-The initial topology is strict hub-and-spoke:
+This section describes the proposed relay protocol, not the implemented
+`/orchestrate room` mode. The current room broker supports moderated peer-visible
+messages and explicit peer response calls; silo mode is the implemented strict
+hub-and-spoke option.
+
+The target relay topology is strict hub-and-spoke:
 
 ```text
 seat A generation <-> coordinator
@@ -159,8 +164,9 @@ seat C generation <-> coordinator
 human <-> current cockpit owner
 ```
 
-Workers cannot list, address, or receive messages from other workers. The
-coordinator forwards only approved artifacts needed for the next phase.
+In the target relay, workers cannot list, address, or receive messages from
+other workers. The coordinator forwards only approved artifacts needed for the
+next phase.
 
 Message envelope:
 
@@ -178,7 +184,7 @@ Message envelope:
 }
 ```
 
-The broker rejects peer recipients in isolated mode.
+A future isolated-mode broker must reject peer recipients.
 
 ## Context Reset
 

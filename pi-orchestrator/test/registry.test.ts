@@ -90,6 +90,7 @@ test("rename rejects duplicate, invalid, and unknown names", () => {
 
   assert.throws(() => renameWorker(workers, "two", "BUILDER"), /already exists/);
   assert.throws(() => renameWorker(workers, "two", "bad name"), /Worker names/);
+  assert.throws(() => renameWorker(workers, "two", "all"), /reserved for room addressing/);
   assert.throws(() => renameWorker(workers, "missing", "valid"), /Unknown worker/);
 });
 

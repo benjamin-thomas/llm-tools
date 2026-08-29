@@ -9,6 +9,8 @@ import {
 
 export type IdSource = () => string;
 
+const RESERVED_WORKER_NAMES = new Set(["all", "human", "orchestrator"]);
+
 export function configuredModelOrder(
   scope: readonly ScopedModelSpec[],
 ): ScopedModelSpec[] {
@@ -34,6 +36,9 @@ export function validateWorkerName(name: string): string {
   const trimmed = name.trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(trimmed)) {
     throw new Error("Worker names must be 1-64 characters using letters, numbers, '.', '_' or '-'.");
+  }
+  if (RESERVED_WORKER_NAMES.has(trimmed.toLowerCase())) {
+    throw new Error(`Worker name is reserved for room addressing: ${trimmed}`);
   }
   return trimmed;
 }

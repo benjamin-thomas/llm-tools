@@ -58,6 +58,16 @@ export interface DispatchReceipt {
   after: string | null;
 }
 
+export interface CompletedAssistantResponse {
+  cursor: string;
+  text: string;
+}
+
+export interface PromptResponseRecovery {
+  promptCursor: string;
+  response: CompletedAssistantResponse | null;
+}
+
 export function captureDispatchReceipt(
   session: CursorSession,
   id: () => string = randomUUID,
@@ -66,6 +76,72 @@ export function captureDispatchReceipt(
     dispatchId: id(),
     after: session.sessionManager.getLeafId(),
   };
+}
+
+function messageText(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((block): block is { type: "text"; text: string } =>
+      Boolean(block)
+      && typeof block === "object"
+      && (block as { type?: unknown }).type === "text"
+      && typeof (block as { text?: unknown }).text === "string",
+    )
+    .map((block) => block.text.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function completedAssistantResponseAfter(
+  session: ReadSession,
+  after: string | null,
+): CompletedAssistantResponse | null {
+  const branch = session.sessionManager.getBranch();
+  let start = 0;
+  if (after !== null) {
+    const cursorIndex = branch.findIndex((entry) => entry.id === after);
+    if (cursorIndex < 0) throw new Error(`Unknown worker message cursor: ${after}`);
+    start = cursorIndex + 1;
+  }
+  const responses = branch.slice(start).flatMap((entry) => {
+    if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") return [];
+    const message = entry.message as { role?: unknown; stopReason?: unknown; content?: unknown };
+    if (message.role !== "assistant" || message.stopReason === "toolUse") return [];
+    const text = messageText(message.content);
+    return text ? [{ cursor: entry.id, text }] : [];
+  });
+  return responses[0] ?? null;
+}
+
+export function findPromptResponseByMarker(
+  session: ReadSession,
+  marker: string,
+): PromptResponseRecovery | null {
+  const branch = session.sessionManager.getBranch();
+  let promptIndex = -1;
+  for (let index = branch.length - 1; index >= 0; index--) {
+    const entry = branch[index]!;
+    if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") continue;
+    const message = entry.message as { role?: unknown; content?: unknown };
+    if (message.role === "user" && messageText(message.content).includes(marker)) {
+      promptIndex = index;
+      break;
+    }
+  }
+  if (promptIndex < 0) return null;
+
+  let response: CompletedAssistantResponse | null = null;
+  for (const entry of branch.slice(promptIndex + 1)) {
+    if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") continue;
+    const message = entry.message as { role?: unknown; stopReason?: unknown; content?: unknown };
+    if (message.role === "user") break;
+    if (message.role !== "assistant" || message.stopReason === "toolUse") continue;
+    const text = messageText(message.content);
+    if (text) response = { cursor: entry.id, text };
+    break;
+  }
+  return { promptCursor: branch[promptIndex]!.id, response };
 }
 
 export function countUnreadResponses(session: ReadSession, after: string | null): number {
@@ -83,8 +159,34 @@ export function countUnreadResponses(session: ReadSession, after: string | null)
   }).length;
 }
 
-export async function waitForWorker(session: WaitSession): Promise<void> {
-  await session.waitForIdle();
+export async function waitForWorker(
+  session: WaitSession,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
+  if (!signal) {
+    await session.waitForIdle();
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason instanceof Error ? signal.reason : new Error("Operation aborted."));
+    };
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    signal.addEventListener("abort", onAbort, { once: true });
+    void session.waitForIdle().then(
+      () => {
+        cleanup();
+        resolve();
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
+  });
 }
 
 export function readWorkerMessages(

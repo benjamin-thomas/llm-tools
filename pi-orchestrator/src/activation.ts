@@ -1,28 +1,24 @@
 export interface ActivationQueue {
-  inProgress: Promise<void> | null;
-  queuedTarget: string | null;
+  tail: Promise<void>;
 }
 
-export async function requestSerializedActivation(
+export function createActivationQueue(): ActivationQueue {
+  return { tail: Promise.resolve() };
+}
+
+export function runSerializedActivation<T>(
+  queue: ActivationQueue,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const result = queue.tail.then(operation);
+  queue.tail = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+export function requestSerializedActivation(
   queue: ActivationQueue,
   target: string,
   activate: (target: string) => Promise<void>,
 ): Promise<void> {
-  queue.queuedTarget = target;
-  if (queue.inProgress) {
-    await queue.inProgress;
-    return;
-  }
-
-  while (queue.queuedTarget !== null) {
-    const next = queue.queuedTarget;
-    queue.queuedTarget = null;
-    const operation = activate(next);
-    queue.inProgress = operation;
-    try {
-      await operation;
-    } finally {
-      queue.inProgress = null;
-    }
-  }
+  return runSerializedActivation(queue, () => activate(target));
 }

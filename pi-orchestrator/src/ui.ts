@@ -14,10 +14,13 @@ export function preferredSwitcherIndex(
 ): number {
   if (snapshot.focusedId !== ORCHESTRATOR_ID) return 0;
 
-  const targetIds = [ORCHESTRATOR_ID, ...snapshot.workers.map((worker) => worker.id)];
+  const workers = snapshot.workers.filter((worker) =>
+    worker.activity === "idle" || worker.activity === "working",
+  );
+  const targetIds = [ORCHESTRATOR_ID, ...workers.map((worker) => worker.id)];
   const previousIndex = previousFocusedId ? targetIds.indexOf(previousFocusedId) : -1;
   if (previousIndex > 0) return previousIndex;
-  return snapshot.workers.length > 0 ? 1 : 0;
+  return workers.length > 0 ? 1 : 0;
 }
 
 export function switchTargetForKey(
@@ -28,7 +31,9 @@ export function switchTargetForKey(
     if (!matchesKey(data, String(digit) as KeyId)) continue;
     if (digit === 0) return snapshot.active ? ORCHESTRATOR_ID : undefined;
     const slot = FIRST_WORKER_KEY + digit - 1;
-    return snapshot.workers.find((worker) => worker.slot === slot)?.id;
+    return snapshot.workers.find((worker) =>
+      worker.slot === slot && (worker.activity === "idle" || worker.activity === "working"),
+    )?.id;
   }
   return undefined;
 }
@@ -58,8 +63,16 @@ export class OrchestratorWidget implements Component {
       return [];
     }
 
+    const roomAttention = snapshot.room?.pendingHumanRequests
+      ? ` #human+${snapshot.room.pendingHumanRequests}`
+      : snapshot.room?.moderationRequired
+        ? " moderate!"
+        : "";
+    const coordinatorLabel = snapshot.mode === "room"
+      ? `orchestrator [room]${roomAttention}`
+      : "orchestrator";
     const entries = [
-      this.segment(snapshot.coordinator.key, "orchestrator", snapshot.coordinator.activity, snapshot.coordinator.focused),
+      this.segment(snapshot.coordinator.key, coordinatorLabel, snapshot.coordinator.activity, snapshot.coordinator.focused),
       ...snapshot.workers.map((worker) =>
         this.segment(worker.key, modelLabel(worker), worker.activity, worker.focused),
       ),

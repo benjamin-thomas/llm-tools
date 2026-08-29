@@ -3,11 +3,17 @@ import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import {
+  activate,
   assertCoordinator,
+  getHost,
   reconcileThinkingLevelForModel,
+  restoreOrchestrator,
+  snapshot,
+  stopWorker,
   updateModel,
   type SharedHost,
 } from "../src/host.js";
+import type { WorkerHandle } from "../src/runtime.js";
 import {
   ORCHESTRATOR_ID,
   SHARED_STATE_VERSION,
@@ -74,6 +80,64 @@ test("updateModel reconciles the worker's thinking level to the new model", () =
   assert.equal(host.workers[0]!.record.thinkingLevel, "high");
 });
 
+test("activation rejects stopped and creating workers even when already focused", async () => {
+  for (const activity of ["stopped", "creating"] as const) {
+    const worker = makeWorkerRecord(activity);
+    const host = makeHost(worker);
+    host.workers[0]!.handle = fakeHandle();
+
+    await assert.rejects(activate(host, worker.id), /Worker is unavailable/);
+  }
+});
+
+test("a worker cannot be reactivated while stop is awaiting disposal", async () => {
+  const worker = makeWorkerRecord("idle");
+  const host = makeHost(worker);
+  let releaseDispose: (() => void) | undefined;
+  let disposalStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { disposalStarted = resolve; });
+  host.workers[0]!.handle = fakeHandle(async () => {
+    disposalStarted?.();
+    await new Promise<void>((resolve) => { releaseDispose = resolve; });
+  });
+
+  const stopping = stopWorker(host, worker.id);
+  await started;
+  assert.equal(snapshot(host).workers.length, 0);
+  const refocus = activate(host, worker.id);
+  releaseDispose?.();
+
+  await stopping;
+  await assert.rejects(refocus, /Worker is unavailable/);
+  assert.equal(host.focusedId, ORCHESTRATOR_ID);
+  assert.equal(host.workers.length, 0);
+});
+
+test("restoreOrchestrator rejects when an orchestration is already active", async () => {
+  const host = getHost();
+  const previous = host.active;
+  host.active = true;
+  try {
+    await assert.rejects(
+      restoreOrchestrator(
+        makeCoordinatorContext({
+          id: ORCHESTRATOR_ID,
+          name: "orchestrator",
+          cwd: "/repo",
+          thinkingLevel: "off",
+          activity: "idle",
+          sessionId: "coordinator-session",
+          lastActivityAt: 1,
+        }),
+        { version: 2, active: false },
+      ),
+      /already active/,
+    );
+  } finally {
+    host.active = previous;
+  }
+});
+
 test("updateModel reconciles the coordinator's thinking level to the new model", () => {
   const oldSpec: ScopedModelSpec = { provider: "anthropic", id: "claude-opus-4-7" };
   const coordinator: CoordinatorRecord = {
@@ -103,6 +167,34 @@ test("updateModel reconciles the coordinator's thinking level to the new model",
   assert.equal(host.coordinator?.thinkingLevel, "high");
 });
 
+function makeWorkerRecord(activity: WorkerRecord["activity"]): WorkerRecord {
+  return {
+    id: "worker-1",
+    slot: 5,
+    name: "worker",
+    cwd: "/repo",
+    model: { provider: "xai", id: "grok" },
+    thinkingLevel: "medium",
+    activity,
+    sessionId: "worker-session",
+    createdAt: 1,
+    lastActivityAt: 1,
+    readCursor: null,
+    unreadCount: 0,
+  };
+}
+
+function fakeHandle(dispose: () => Promise<void> = async () => {}): WorkerHandle {
+  return {
+    started: true,
+    state: "active",
+    start() {},
+    suspend() {},
+    resume() {},
+    dispose,
+  } as unknown as WorkerHandle;
+}
+
 function makeModel(overrides: Partial<Model<"anthropic-messages">> = {}): Model<"anthropic-messages"> {
   return {
     id: "test-model",
@@ -123,13 +215,17 @@ function makeHost(worker: WorkerRecord): SharedHost {
   return {
     version: SHARED_STATE_VERSION,
     active: true,
+    mode: "silo",
+    room: null,
+    roomPumps: new Set(),
+    tearingDownWorkerIds: new Set(),
     focusedId: worker.id,
     previousFocusedId: null,
     coordinator: null,
     scopedModels: [],
     workers: [{ record: worker, handle: null }],
     subscribers: new Set(),
-    activation: { inProgress: null, queuedTarget: null },
+    activation: { tail: Promise.resolve() },
     parentTui: null,
     parentDone: null,
     parentHandoffActive: false,
@@ -142,13 +238,17 @@ function makeCoordinatorHost(coordinator: CoordinatorRecord): SharedHost {
   return {
     version: SHARED_STATE_VERSION,
     active: true,
+    mode: "silo",
+    room: null,
+    roomPumps: new Set(),
+    tearingDownWorkerIds: new Set(),
     focusedId: ORCHESTRATOR_ID,
     previousFocusedId: null,
     coordinator,
     scopedModels: [],
     workers: [],
     subscribers: new Set(),
-    activation: { inProgress: null, queuedTarget: null },
+    activation: { tail: Promise.resolve() },
     parentTui: null,
     parentDone: null,
     parentHandoffActive: false,

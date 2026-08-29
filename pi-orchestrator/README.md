@@ -5,14 +5,16 @@ dynamic set of independently interactive workers.
 
 ## First slice
 
-Run:
+Run `/orchestrate` and choose a communication mode, or select one directly:
 
 ```text
-/orchestrate
+/orchestrate silo
+/orchestrate room
 ```
 
-The current Pi session becomes the orchestrator. Then describe the worker setup
-in natural language, for example:
+The current Pi session becomes the orchestrator. Silo mode is the safe default
+and preserves the original hub-and-spoke behavior. Then describe the worker
+setup in natural language, for example:
 
 ```text
 Spin up three workers using the balanced default models.
@@ -26,19 +28,60 @@ idle worker a fresh native session while preserving its stable identity, slot,
 name, cwd, model, and thinking level. Workers can use only
 models from the scoped models active when orchestration starts.
 
-Communication is hub-and-spoke. The orchestrator can dispatch an instruction,
-wait for that worker to settle, and read structured session messages from a
-stable entry cursor. Each send returns a dispatch ID and pre-send cursor;
-automatic read cursors prevent transcript replay. Completed replies appear as
-`+N` worker badges and through the `inbox` operation; intermediate assistant
-turns that only invoke tools do not increase the badge. Communication is rendered
-as a conversational transcript
-with explicit `sender → receiver` labels. Technical metadata stays hidden in
-the default view; expanding a tool result reveals syntax-highlighted YAML, with
-embedded JSON recursively expanded for debugging. The original value remains
-in tool-result details. An idle worker starts
-immediately; a busy worker receives a follow-up by default, with explicit
-steering available. Workers cannot address one another.
+In silo mode, communication is hub-and-spoke. The orchestrator can dispatch an
+instruction, wait for that worker to settle, and read structured session
+messages from a stable entry cursor. Each send returns a dispatch ID and
+pre-send cursor; automatic read cursors prevent transcript replay. An explicit
+`cursor` inspects history without moving that automatic cursor. Completed
+replies appear as `+N` worker badges and through the `inbox` operation;
+intermediate assistant turns that only invoke tools do not increase the badge.
+An idle worker starts immediately; a busy worker receives a follow-up by
+default, with explicit steering available.
+
+Room mode adds a durable shared channel while retaining independent native Pi
+sessions. Addressing a named participant is a visible **tell** by default and
+does not wake that participant. Set `expectReply: true` for an explicit named
+**call**:
+
+- `#john` or `#tester` records a tell unless `expectReply` is true;
+- `#all` always requires every live worker to respond, excluding its worker sender;
+- `#human` creates persistent human attention and interrupts a coordinator wait;
+- `#orchestrator` requests an immediate moderation checkpoint;
+- an unaddressed message is visible room context and wakes nobody.
+
+Worker names are unique, case-insensitive addresses; `all`, `human`, and
+`orchestrator` are reserved. The typed `room` tool carries canonical recipients,
+while `#name` is the human-facing notation and has editor autocomplete. Stable
+worker IDs are recorded when a message is posted, so later renames do not alter
+history. A called worker receives unread room context, and its completed final
+answer is published back to the room automatically.
+
+Only one `#all` broadcast epoch may be open. A second broadcast is rejected
+until every snapshotted recipient has responded or explicitly failed. Delivery
+alone does not satisfy the barrier. Workers cannot create response obligations
+while a broadcast is open, and each worker can owe at most one response.
+
+Every completed broadcast requires moderation before the next response call.
+A configurable worker-message interval (default eight) can also request a
+checkpoint. At a checkpoint, new pump deliveries and ordinary worker posts are
+paused while already-delivered responses may finish; `moderate continue` resumes
+pending work. A coordinator `wait` tracks the open broadcast (or the current
+snapshot of calls) rather than future obligations and returns early for
+moderation or `#human`. The orchestrator can then `read`, `moderate`, resolve
+human requests, continue, redirect, or conclude. For example:
+
+```text
+Create three workers named implementer, tester, and reviewer.
+Configure moderation every six worker responses.
+Ask #all to propose an approach independently, wait for the room to settle,
+moderate the responses, and report agreements and unresolved objections to me.
+```
+
+Both modes render communication as a conversational transcript with explicit
+`sender → receiver` labels. Technical metadata stays hidden in the default
+view; expanding a tool result reveals syntax-highlighted YAML, with embedded
+JSON recursively expanded for debugging. The original value remains in
+tool-result details.
 
 ### Navigation
 
@@ -49,7 +92,7 @@ steering available. Workers cannot address one another.
 - `Alt+S`, then arrow keys and Enter: select from the same switcher interactively
 - `Ctrl+D` in a worker with an empty editor: close that worker and return to the orchestrator
 - `/worker-name <name>`: rename the focused worker
-- `/orchestrate status`: show a short status summary
+- `/orchestrate status`: show the mode and a short status summary
 - `/orchestrate stop`: stop all workers and leave orchestration mode
 
 The persistent worker widget shows each worker's responsibility/name, model,
@@ -64,7 +107,7 @@ workers are restored automatically from their native session files.
 ## Rotating TDD skill
 
 The package ships a Pi-native `rotating-tdd` skill. After activating
-`/orchestrate`, invoke it explicitly with:
+`/orchestrate silo`, invoke it explicitly with:
 
 ```text
 /skill:rotating-tdd <work item>
@@ -94,12 +137,14 @@ confidence without overgeneralizing from a small sample.
 - Default workers follow the user-configured scoped-model order by
   `(stable worker position % model count)`; explicit model choices override that
   slot without changing the configured order.
-- A scoped model without an explicit thinking level starts workers at `medium`.
+- A scoped model without an explicit thinking level requests `medium`; the worker record is updated to the level the child session actually accepts.
 - The first slice allows at most eight live workers.
-- Worker communication is orchestrator-to-worker only; peer messaging is rejected by design.
-- The worker list is persisted as hidden coordinator-session metadata. Resuming
-  that coordinator restores idle worker runtimes; interrupted generation is not
-  restarted automatically.
+- Silo workers cannot message peers. Room workers communicate only through the typed broker; they never invoke another session directly.
+- The worker list, selected mode, room log, cursors, response obligations, and
+  broadcast barrier are persisted as hidden coordinator-session metadata.
+  Resuming that coordinator restores idle worker runtimes, recovers completed
+  responses from marked child prompts, and redispatches only unresolved room
+  obligations; interrupted ordinary generation is not restarted automatically.
 - `/orchestrate stop` records that orchestration was intentionally ended, so it
   is not restored on the next resume.
 - Native terminal handoff uses an isolated compatibility adapter because Pi has

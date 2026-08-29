@@ -44,6 +44,16 @@ export interface WorkerRuntimeCallbacks {
   onError(error: Error): void;
 }
 
+export function syncWorkerConfigurationFromSession(
+  worker: WorkerRecord,
+  session: Pick<AgentSessionRuntime["session"], "model" | "thinkingLevel">,
+): void {
+  if (session.model) {
+    worker.model = { provider: session.model.provider, id: session.model.id };
+  }
+  worker.thinkingLevel = session.thinkingLevel;
+}
+
 function resetExtendedKeyboardModes(): void {
   process.stdout.write("\x1b[<999u\x1b[>4;0m");
 }
@@ -107,7 +117,7 @@ export async function createWorkerHandle(
   worker: WorkerRecord,
   getScope: () => readonly ScopedModelSpec[],
   callbacks: WorkerRuntimeCallbacks,
-  options: { extensionEntry?: string; resumeExistingSession?: boolean } = {},
+  options: { extensionEntry?: string; resumeExistingSession?: boolean; roomEnabled?: boolean } = {},
 ): Promise<WorkerHandle> {
   const extensionEntry = options.extensionEntry
     ?? fileURLToPath(new URL("./index.ts", import.meta.url));
@@ -180,8 +190,11 @@ export async function createWorkerHandle(
       reason: resumeExistingSession ? "resume" : "startup",
     },
   });
+  syncWorkerConfigurationFromSession(worker, runtime.session);
   runtime.session.setSessionName(worker.name);
-  runtime.session.setActiveToolsByName(workerToolNames(runtime.session.getActiveToolNames()));
+  runtime.session.setActiveToolsByName(
+    workerToolNames(runtime.session.getActiveToolNames(), options.roomEnabled ?? false),
+  );
 
   const mode = new InteractiveMode(runtime, {
     migratedProviders: [],
@@ -192,6 +205,7 @@ export async function createWorkerHandle(
   const access = getInteractiveModeAccess(mode);
   installTerminalGate(access, callbacks);
 
+  let disposePromise: Promise<void> | null = null;
   const handle: WorkerHandle = {
     runtime,
     mode,
@@ -224,13 +238,25 @@ export async function createWorkerHandle(
       handle.state = "active";
       callbacks.onState("active");
     },
-    async dispose() {
-      if (handle.state === "stopped") return;
-      if (callbacks.isFocused()) access.stop();
-      else stopWithoutTerminalEffects(access);
-      await runtime.dispose();
+    dispose() {
+      if (disposePromise) return disposePromise;
+      if (handle.state === "stopped") return Promise.resolve();
       handle.state = "stopped";
       callbacks.onState("stopped");
+      disposePromise = (async () => {
+        try {
+          if (callbacks.isFocused()) access.stop();
+          else stopWithoutTerminalEffects(access);
+        } finally {
+          try {
+            await runtime.session.abort();
+          } catch {
+            // Abort must not prevent runtime teardown.
+          }
+          await runtime.dispose();
+        }
+      })();
+      return disposePromise;
     },
   };
   return handle;

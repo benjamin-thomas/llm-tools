@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   captureDispatchReceipt,
+  completedAssistantResponseAfter,
   countUnreadResponses,
   dispatchToWorker,
+  findPromptResponseByMarker,
   readWorkerMessages,
   readWorkerMessagesWithRecovery,
   waitForWorker,
@@ -24,6 +26,47 @@ test("dispatch receipt captures a stable pre-send cursor and ID", () => {
   });
 });
 
+test("a completed response can be recovered from a marked room prompt", () => {
+  const session: ReadSession = {
+    sessionManager: {
+      getBranch: () => [
+        {
+          type: "message",
+          id: "prompt",
+          timestamp: "t0",
+          message: { role: "user", content: "[pi-orchestrator room message room-1]\nAudit." },
+        },
+        {
+          type: "message",
+          id: "response",
+          timestamp: "t1",
+          message: { role: "assistant", stopReason: "stop", content: "Recovered." },
+        },
+      ],
+    },
+  };
+
+  assert.deepEqual(findPromptResponseByMarker(session, "[pi-orchestrator room message room-1]"), {
+    promptCursor: "prompt",
+    response: { cursor: "response", text: "Recovered." },
+  });
+  assert.equal(findPromptResponseByMarker(session, "missing"), null);
+
+  const superseded: ReadSession = {
+    sessionManager: {
+      getBranch: () => [
+        ...session.sessionManager.getBranch().slice(0, 1),
+        { type: "message", id: "new-prompt", timestamp: "t1", message: { role: "user", content: "Other work." } },
+        { type: "message", id: "other-response", timestamp: "t2", message: { role: "assistant", content: "Other result." } },
+      ],
+    },
+  };
+  assert.deepEqual(findPromptResponseByMarker(
+    superseded,
+    "[pi-orchestrator room message room-1]",
+  ), { promptCursor: "prompt", response: null });
+});
+
 test("unread responses count completed replies rather than intermediate tool turns", () => {
   const session: ReadSession = {
     sessionManager: {
@@ -40,6 +83,23 @@ test("unread responses count completed replies rather than intermediate tool tur
   };
 
   assert.equal(countUnreadResponses(session, "old"), 1);
+});
+
+test("the first completed assistant response after a dispatch excludes intermediate tool turns", () => {
+  const session: ReadSession = {
+    sessionManager: {
+      getBranch: () => [
+        { type: "message", id: "before", timestamp: "t0", message: { role: "user", content: "Work" } },
+        { type: "message", id: "tool", timestamp: "t1", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "Checking" }] } },
+        { type: "message", id: "reply", timestamp: "t2", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Finished" }] } },
+      ],
+    },
+  };
+
+  assert.deepEqual(completedAssistantResponseAfter(session, "before"), {
+    cursor: "reply",
+    text: "Finished",
+  });
 });
 
 test("dispatch acknowledges an idle worker as soon as prompt preflight accepts", async () => {
@@ -127,6 +187,18 @@ test("wait resolves only after the worker agent becomes idle", async () => {
   release?.();
   await waiting;
   assert.equal(resolved, true);
+});
+
+test("wait can be aborted without waiting for the worker to become idle", async () => {
+  const controller = new AbortController();
+  const session: WaitSession = {
+    waitForIdle: () => new Promise<void>(() => {}),
+  };
+  const waiting = waitForWorker(session, controller.signal);
+
+  controller.abort(new Error("cancelled"));
+
+  await assert.rejects(waiting, /cancelled/);
 });
 
 test("read returns structured worker messages after a stable entry cursor", () => {

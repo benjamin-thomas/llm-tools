@@ -1,11 +1,12 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
 export const ORCHESTRATOR_ID = "__orchestrator__";
-export const SHARED_STATE_VERSION = 2 as const;
+export const SHARED_STATE_VERSION = 4 as const;
 export const FIRST_WORKER_KEY = 5;
 export const LAST_WORKER_KEY = 12;
 
 export type Activity = "creating" | "idle" | "working" | "stopped" | "error";
+export type OrchestrationMode = "silo" | "room";
 
 export interface ScopedModelSpec {
   provider: string;
@@ -47,9 +48,18 @@ export interface PublicWorker extends WorkerRecord {
   focused: boolean;
 }
 
+export interface RoomSnapshot {
+  messages: number;
+  openBroadcastId: string | null;
+  moderationRequired: boolean;
+  pendingHumanRequests: number;
+}
+
 export interface OrchestratorSnapshot {
   active: boolean;
+  mode: OrchestrationMode;
   focusedId: string;
+  room?: RoomSnapshot;
   coordinator?: CoordinatorRecord & { focused: boolean; key: "0" };
   workers: PublicWorker[];
   scopedModels: ScopedModelSpec[];
