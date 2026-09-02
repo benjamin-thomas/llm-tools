@@ -535,6 +535,21 @@ module SandboxLib
     args.push(*ro(local_dir))    if File.directory?(local_dir)
     args.push(*rw(claude_dir))   if File.directory?(claude_dir)
     args.push(*rw(claude_json))  if File.exist?(claude_json)
+    # ~/.claude comes through rw, symlinks and all, so a statusline.rb linked out
+    # to a repo dangles in every other project's sandbox. Mount the target ro --
+    # the host runs this file on a timer, outside the sandbox. Skipped when it is
+    # inside the project, already covered rw.
+    statusline = "#{claude_dir}/statusline.rb"
+    if File.symlink?(statusline)
+      target = begin
+        File.realpath(statusline)
+      rescue SystemCallError
+        nil
+      end
+      if target && !target.start_with?("#{project_dir}/")
+        args.push(*ro(target))
+      end
+    end
     # Native Claude Code install: runtime state/lock + versioned binaries live under
     # ~/.local, which is mounted read-only above. Overlay these subtrees rw so the
     # native `claude` binary can take its launch lock and self-manage versions.

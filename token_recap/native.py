@@ -19,9 +19,14 @@ _CLAUDE: dict[str, tuple[float, float]] = {
 _WRITE_5M = 1.25
 _WRITE_1H = 2.00
 _CACHE_READ = 0.10
+# Claude Fable 5.1 reads cache at 0.025x base input ($0.25/MTok), not the 0.1x
+# every other card charges. Mythos 5.1 was unconfirmed at launch, so it keeps
+# the ordinary multiple.
+_CACHE_READ_FABLE_5_1 = 0.025
 
 # Re-exported for callers that need to derive a rate card rather than a cost.
 CLAUDE_WRITE_5M = _WRITE_5M
+CLAUDE_WRITE_1H = _WRITE_1H
 CLAUDE_CACHE_READ = _CACHE_READ
 
 # xAI list, docs.x.ai, Aug 2026. (input, cache read, output) $/MTok, at the
@@ -83,6 +88,11 @@ def claude_family(model: str) -> str | None:
     return "opus"
 
 
+def claude_cache_read(model: str) -> float:
+    """What one cached input token costs this model, as a multiple of input."""
+    return _CACHE_READ_FABLE_5_1 if "fable-5-1" in model.lower() else _CACHE_READ
+
+
 def claude_card(model: str) -> tuple[float, float] | None:
     """The (input, output) $/MTok pair for a model's family."""
     family = claude_family(model)
@@ -105,7 +115,7 @@ def claude_native_usd(
         uncached / MTOK * inp
         + write_5m / MTOK * inp * _WRITE_5M
         + write_1h / MTOK * inp * _WRITE_1H
-        + cache_read / MTOK * inp * _CACHE_READ
+        + cache_read / MTOK * inp * claude_cache_read(model)
         + output / MTOK * out
     )
 

@@ -13,8 +13,8 @@ from __future__ import annotations
 from token_recap.buckets import Rates, TokenBuckets
 from token_recap.catalogue import catalogue_rates
 from token_recap.native import (
-    CLAUDE_CACHE_READ,
     CLAUDE_WRITE_5M,
+    claude_cache_read,
     claude_card,
     claude_family,
     claude_native_usd,
@@ -167,7 +167,7 @@ def display_rates(model: str, provider: str) -> Rates | None:
                 model,
                 input=inp,
                 output=out,
-                cache_read=inp * CLAUDE_CACHE_READ,
+                cache_read=inp * claude_cache_read(name),
                 cache_write=inp * CLAUDE_WRITE_5M,
             )
     if who in ("", "xai") and knows_grok(name):
