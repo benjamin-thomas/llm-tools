@@ -93,7 +93,7 @@ parser = OptionParser.new do |opts|
 
   opts.separator ""
   opts.separator "Subcommands:"
-  opts.separator "  sandbox-agent allow <project-dir>"
+  opts.separator "  sandbox-agent allow [<project-dir>]   (default: the current directory)"
   opts.separator "    Approve the project's .sandbox-mounts after reading it. Required"
   opts.separator "    before a first launch, and again after any change to the file —"
   opts.separator "    it lives in the project, so an agent can edit it."
@@ -211,7 +211,10 @@ begin
 rescue OptionParser::ParseError => e
   abort "#{e.message}\n\n#{parser.help}"
 end
-project_dir = File.expand_path(ARGV.shift || abort(parser.help))
+# `allow` may be given without a path: approving the project you are standing in
+# is the common case, and cwd is unambiguous there — unlike a launch, where a
+# bare argument could just as well be the command.
+project_dir = File.expand_path(ARGV.shift || (allow ? Dir.pwd : abort(parser.help)))
 ARGV.shift if ARGV.first == "--"
 abort "No command specified.\n\n#{parser.help}" if ARGV.empty? && !doctor && !allow
 cmd = ARGV.dup
