@@ -4,67 +4,66 @@ from token_recap.buckets import MTOK, Rates
 
 # Anthropic first-party list, platform.claude.com, Aug 2026. (input, output)
 # $/MTok per rate tier. Every Claude cache rate is a fixed multiple of the
-# input rate, so only the base pair is tabulated.
+# input rate, so only the base pair is tabulated. The 1M window is standard
+# priced from 4.6 on, so a "[1m]" model id needs no tier of its own.
 #
-# Every Sonnet bills at the 3.00/15.00 list. Sonnet 5 has a 2.00/10.00 intro
-# rate that lapses 2026-08-31; pricing it at list keeps one dated constant out
-# of the table, at the cost of over-stating Sonnet 5 until then.
+# One rate per family, set to the current model in it. Sonnet is Sonnet 5's
+# 2.00/10.00 — announced as an intro rate to 2026-08-31, since made standard —
+# which under-states a Sonnet 4.6 or older session (those bill at 3.00/15.00).
 _CLAUDE: dict[str, tuple[float, float]] = {
     "fable": (10.0, 50.0),  # also Mythos 5, same card
     "opus": (5.0, 25.0),
-    "sonnet": (3.0, 15.0),
+    "sonnet": (2.0, 10.0),
     "haiku": (1.0, 5.0),
 }
 _WRITE_5M = 1.25
 _WRITE_1H = 2.00
 _CACHE_READ = 0.10
 
-# xAI list, docs.x.ai, Aug 2026. grok-4.5 and grok-4.6 share one rate card.
-# Prompt >= 200k doubles every bucket on that request.
-_GROK_LO = Rates("grok <200k", input=2.0, output=6.0, cache_read=0.50, cache_write=0.0)
-_GROK_HI = Rates("grok ≥200k", input=4.0, output=12.0, cache_read=1.00, cache_write=0.0)
+# Re-exported for callers that need to derive a rate card rather than a cost.
+CLAUDE_WRITE_5M = _WRITE_5M
+CLAUDE_CACHE_READ = _CACHE_READ
+
+# xAI list, docs.x.ai, Aug 2026. (input, cache read, output) $/MTok, at the
+# <200k and the ≥200k rate. A prompt of 200k or more — cached tokens counted —
+# bills every bucket of that request, output included, at the ≥200k row.
+# 4.5 and 4.6 share input and output but not the cached-input rate. Writes are
+# free on every card: xAI publishes no cache-write line.
+_GROK: dict[str, tuple[tuple[float, float, float], tuple[float, float, float]]] = {
+    "grok-4.6": ((2.0, 0.50, 6.0), (4.0, 1.00, 12.0)),
+    "grok-4.5": ((2.0, 0.30, 6.0), (4.0, 0.60, 12.0)),
+    "grok-build-0.1": ((1.0, 0.20, 2.0), (2.0, 0.40, 4.0)),
+}
+GROK_FALLBACK = "grok-4.6"
+_GROK_LONG_CONTEXT = 200_000
 
 # OpenAI first-party list, developers.openai.com/api/docs/pricing, Aug 2026.
-# (input, cache read, output) $/MTok. Cache writes bill as ordinary input, so
-# there is no separate write line.
-_CODEX: dict[str, tuple[float, float, float]] = {
-    "gpt-5.6-sol": (4.00, 0.40, 20.00),
-    "gpt-5.6-terra": (2.00, 0.20, 12.00),
-    "gpt-5.6-luna": (0.20, 0.02, 1.20),
-    "gpt-5.5": (5.00, 0.50, 30.00),
-    "gpt-5.4": (2.50, 0.25, 15.00),
-    "gpt-5.4-mini": (0.75, 0.075, 4.50),
-    "gpt-5.3-codex": (1.75, 0.175, 14.00),
-    "gpt-5.2": (1.75, 0.175, 14.00),
-    "gpt-5.2-codex": (1.75, 0.175, 14.00),
-    "gpt-5.1-codex-max": (1.25, 0.125, 10.00),
-    "gpt-5.1-codex-mini": (0.25, 0.025, 2.00),
-    "gpt-5-codex": (1.25, 0.125, 10.00),
+# (input, cache read, cache write, output) $/MTok. GPT-5.6 charges a premium
+# for a cache write; every earlier model bills a write as ordinary input, so
+# its write rate is just its input rate.
+_CODEX: dict[str, tuple[float, float, float, float]] = {
+    "gpt-5.6-sol": (4.00, 0.40, 5.00, 20.00),
+    "gpt-5.6": (4.00, 0.40, 5.00, 20.00),
+    "gpt-5.6-terra": (2.00, 0.20, 2.50, 12.00),
+    "gpt-5.6-luna": (0.20, 0.02, 0.25, 1.20),
+    "gpt-5.5": (5.00, 0.50, 5.00, 30.00),
+    "gpt-5.4": (2.50, 0.25, 2.50, 15.00),
+    "gpt-5.4-mini": (0.75, 0.075, 0.75, 4.50),
+    "gpt-5.3-codex": (1.75, 0.175, 1.75, 14.00),
+    "gpt-5.2": (1.75, 0.175, 1.75, 14.00),
+    "gpt-5.2-codex": (1.75, 0.175, 1.75, 14.00),
+    "gpt-5.1-codex-max": (1.25, 0.125, 1.25, 10.00),
+    "gpt-5.1-codex-mini": (0.25, 0.025, 0.25, 2.00),
+    "gpt-5.1-codex": (1.25, 0.125, 1.25, 10.00),
+    "gpt-5-codex": (1.25, 0.125, 1.25, 10.00),
+    "gpt-5": (1.25, 0.125, 1.25, 10.00),
 }
 
-# Research previews and internal aliases have no published rate. Bill them at
-# the current Codex default, on the grounds that an unnamed model is more
-# likely current than old, and let the model breakdown show the real name.
+# Research previews and internal aliases (gpt-5.3-codex-spark, codex-auto-review,
+# gpt-reserve) have no published rate. Bill them at the current Codex default —
+# an unnamed model is likelier current than old — and let the model breakdown
+# show the real name. This row is an estimate, not a quoted rate.
 CODEX_FALLBACK = "gpt-5.6-sol"
-
-# First-party api.deepseek.com, V4 Flash, off-peak. Peak hours are 2×.
-# Cache writes are billed as cache-miss input.
-DEEPSEEK_COM_FLASH_OFFPEAK = Rates(
-    name="DeepSeek.com Flash",
-    input=0.22,
-    output=0.66,
-    cache_read=0.007,
-    cache_write=0.22,
-)
-
-# RunInfra hosted DeepSeek V4 Pro. No write line: new tokens billed as input.
-RUNINFRA_PRO = Rates(
-    name="RunInfra Pro",
-    input=0.60,
-    output=1.90,
-    cache_read=0.03,
-    cache_write=0.60,
-)
 
 
 def claude_family(model: str) -> str | None:
@@ -82,6 +81,12 @@ def claude_family(model: str) -> str | None:
     if "claude" not in name:
         return None  # a non-Anthropic model logged under ~/.claude
     return "opus"
+
+
+def claude_card(model: str) -> tuple[float, float] | None:
+    """The (input, output) $/MTok pair for a model's family."""
+    family = claude_family(model)
+    return None if family is None else _CLAUDE[family]
 
 
 def claude_native_usd(
@@ -105,16 +110,36 @@ def claude_native_usd(
     )
 
 
-def grok_native_usd(prompt: int, cached: int, output: int) -> float:
-    rates = _GROK_HI if prompt >= 200_000 else _GROK_LO
+def knows_grok(model: str) -> bool:
+    """Whether we hold an xAI card for this model, rather than a fallback."""
+    return model.lower().strip() in _GROK
+
+
+def knows_codex(model: str) -> bool:
+    """Whether we hold an OpenAI card for this model, rather than a fallback."""
+    return model.lower().strip() in _CODEX
+
+
+def grok_rates(model: str, prompt: int) -> Rates:
+    key = model.lower().strip()
+    lo, hi = _GROK.get(key, _GROK[GROK_FALLBACK])
+    long_context = prompt >= _GROK_LONG_CONTEXT
+    inp, cache_read, out = hi if long_context else lo
+    tier = "≥200k" if long_context else "<200k"
+    return Rates(
+        f"{key} {tier}", input=inp, output=out, cache_read=cache_read, cache_write=0.0
+    )
+
+
+def grok_native_usd(model: str, prompt: int, cached: int, output: int) -> float:
     uncached = prompt - cached if prompt >= cached else 0
-    return rates.cost(uncached, 0, cached, output)
+    return grok_rates(model, prompt).cost(uncached, 0, cached, output)
 
 
 def codex_rates(model: str) -> Rates:
     key = model.lower().strip()
-    inp, cread, out = _CODEX.get(key, _CODEX[CODEX_FALLBACK])
-    return Rates(model, input=inp, output=out, cache_read=cread, cache_write=0.0)
+    inp, cread, cwrite, out = _CODEX.get(key, _CODEX[CODEX_FALLBACK])
+    return Rates(model, input=inp, output=out, cache_read=cread, cache_write=cwrite)
 
 
 def codex_native_usd(

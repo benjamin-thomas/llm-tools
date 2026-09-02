@@ -5,11 +5,15 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from token_recap.buckets import Rates, TokenBuckets
-from token_recap.windows import WeeklyReset
+from token_recap.buckets import TokenBuckets
+from token_recap.harness import display_rates
+from token_recap.windows import Window
 
 _CSI = re.compile(r"\x1b\[[0-9;]*m")
-BOX_WIDTH = 64
+MIN_BOX = 80
+# Every column after the name, each preceded by one space.
+_COUNT_COLS = (1 + 7) + (1 + 7) + (1 + 7) + (1 + 6)
+_PRICE_COLS = (1 + 9) + (1 + 7) + (1 + 8) + (1 + 7)
 
 
 @dataclass(frozen=True)
@@ -43,7 +47,15 @@ class Palette:
         return self.wrap("31", text)
 
     def provider(self, name: str, text: str) -> str:
-        code = {"claude": "38;5;208", "grok": "36", "codex": "32"}.get(name, "1")
+        code = {
+            "claude": "38;5;208",
+            "grok": "36",
+            "codex": "32",
+            "api": "35",
+            "free": "2",
+            "ollama": "34",
+            "hyper": "38;5;213",
+        }.get(name, "1")
         return self.wrap(code, text)
 
 
@@ -113,8 +125,10 @@ def _pad(text: str, width: int) -> str:
     return text + " " * pad
 
 
-def _box(title: str, body: list[str], pal: Palette, accent: str | None = None) -> str:
-    inner = BOX_WIDTH - 2
+def _box(
+    title: str, body: list[str], pal: Palette, width: int, accent: str | None = None
+) -> str:
+    inner = width - 2
     head = pal.provider(accent, title) if accent else pal.bold(title)
     label = f" {head} "
     fill = inner - vis_len(label) - 1
@@ -141,6 +155,8 @@ def _window_caption(start: datetime, end: datetime, now: datetime) -> str:
         return f"starts in {fmt_span(start - now)}"
     if now < end:
         return f"{fmt_span(now - start)} in · {fmt_span(end - now)} left"
+    if (now - end).total_seconds() < 60:
+        return f"{length} to now"  # ends at this instant: running, not closed
     return f"closed · {length}"
 
 
@@ -157,79 +173,144 @@ def _mix_row(label: str, n: int, total: int, pal: Palette, tone: str) -> str:
     return f"  {label:<10} {meter}  {pct}  {pal.dim(compact_count(n))}"
 
 
-def _models_line(buckets: TokenBuckets, pal: Palette) -> str:
-    parts: list[str] = []
-    for model, n in buckets.models.most_common():
-        short = model.replace("claude-", "").replace("-20251001", "")
+def _model_row(
+    name: str,
+    width: int,
+    calls: str,
+    inp: str,
+    cached: str,
+    out: str,
+    prices: tuple[str, str, str, str] | None,
+) -> str:
+    """Counts, then what they cost, then the unit price behind that cost.
+
+    Model names are never abbreviated: the box grows to fit the longest one.
+    An id says which of two near-identical models and providers a row is, so
+    an ellipsis through the middle of it destroys the row's whole point.
+    """
+    row = f"  {_pad(name, width)} {calls:>7} {inp:>7} {cached:>7} {out:>6}"
+    if prices is None:
+        return row
+    total, rate_in, rate_cached, rate_out = prices
+    return f"{row} {total:>9} {rate_in:>7} {rate_cached:>8} {rate_out:>7}"
+
+
+def fmt_rate(value: float) -> str:
+    """A $/MTok figure: cents matter at the top, fractions of one at the tail."""
+    if value < 0.01:
+        return f"${value:.4f}" if value > 0 else "$0"
+    return f"${value:.2f}"
+
+
+def model_names(buckets: TokenBuckets) -> list[str]:
+    """The names as rendered, for sizing the column that holds them."""
+    return [_short_model(name) for name in buckets.models]
+
+
+def _short_model(name: str) -> str:
+    return name.replace("claude-", "").replace("-20251001", "")
+
+
+def models_lines(
+    buckets: TokenBuckets, pal: Palette, width: int, prices: bool = True
+) -> list[str]:
+    """A row per model: a joined list loses its tail to the box edge.
+
+    Every column is labelled, because an unlabelled tally sitting under a
+    dollar figure reads like a breakdown of that figure.
+    """
+    rows: list[str] = []
+    ranked = buckets.by_cost() if prices else buckets.by_output()
+    for model, use in ranked:
+        short = _short_model(model)
         if short == "<synthetic>":
-            continue
-        parts.append(f"{short} {fmt_int(n)}")
-    if not parts:
-        return pal.dim("  no model breakdown")
-    return pal.dim("  " + " · ".join(parts))
+            continue  # no request was made, so there is nothing to attribute
+        # The unit price sits beside the count it explains, so a row can be
+        # read as money without going and looking the card up. A dash means no
+        # published rate, which is not the same as a rate of zero.
+        priced: tuple[str, str, str, str] | None = None
+        if prices:
+            rates = display_rates(use.model_id or model, use.provider)
+            priced = (
+                fmt_money(use.native_usd),
+                fmt_rate(rates.input) if rates else "-",
+                fmt_rate(rates.cache_read) if rates else "-",
+                fmt_rate(rates.output) if rates else "-",
+            )
+        rows.append(
+            pal.dim(
+                _model_row(
+                    short,
+                    width,
+                    fmt_int(use.calls),
+                    compact_count(use.uncached),
+                    compact_count(use.cached),
+                    compact_count(use.output),
+                    priced,
+                )
+            )
+        )
+    if not rows:
+        return [pal.dim("  no model breakdown")]
+    header = _model_row(
+        "model",
+        width,
+        "calls",
+        "in",
+        "cached",
+        "out",
+        ("total", "$in/M", "$cache/M", "$out/M") if prices else None,
+    )
+    return [pal.dim(header)] + rows
 
 
-def fmt_mult(mult: float) -> str:
-    if abs(mult - round(mult)) < 1e-9:
-        return str(int(round(mult)))
-    return f"{mult:g}"
+@dataclass(frozen=True)
+class Meter:
+    """A provider's own reading of the quota it is metering you on.
 
+    Not a token count and not comparable to one: providers weight it by model
+    and count usage this machine's logs never see.
+    """
 
-def _cheaper(native: float, cheap: float) -> str:
-    if cheap <= 0 or native <= 0:
-        return ""
-    ratio = native / cheap
-    if ratio < 1.05:
-        return ""
-    if ratio >= 10:
-        return f"{ratio:.0f}× cheaper"
-    return f"{ratio:.1f}× cheaper"
-
-
-def _money_row(pal: Palette, label: str, amount: float, note: str = "") -> str:
-    row = f"  {pal.dim(_pad(label, 16))} {pal.green(pal.bold(f'{fmt_money(amount):>10}'))}"
-    if note:
-        row += f"  {pal.dim(note)}"
-    return row
+    used: float | None  # 0..1, or None when the provider will not say
+    note: str
 
 
 @dataclass
 class ProviderView:
     key: str
     title: str
-    spec: WeeklyReset | None
-    start: datetime
-    end: datetime
+    window: Window
     buckets: TokenBuckets
-    native_label: str
+    meter: Meter | None = None
+    source: str = ""  # who reported this section, when the rows no longer say
+    prices: bool = True
+    short: str = ""  # the summary-table name; the title is often too long
 
-
-def _bucket_cost(rates: Rates, buckets: TokenBuckets) -> float:
-    return rates.cost(
-        buckets.uncached, buckets.cache_write, buckets.cache_read, buckets.output
-    )
+    @property
+    def summary_name(self) -> str:
+        return self.short or self.key.capitalize()
 
 
 def render_provider(
-    view: ProviderView,
-    now: datetime,
-    flash: Rates,
-    pro: Rates,
-    token_mult: float,
-    pal: Palette,
+    view: ProviderView, now: datetime, pal: Palette, width: int, name_col: int
 ) -> str:
     b = view.buckets
-    flash_1x = _bucket_cost(flash, b)
-    flash_nx = flash_1x * token_mult
-    pro_1x = _bucket_cost(pro, b)
-    frac = _window_frac(view.start, view.end, now)
-    week_bar = pal.cyan(bar(frac, 20))
-    reset = view.spec.label + " local" if view.spec else "custom window"
-    when = f"{view.start:%d %b %H:%M} → {view.end:%d %b %H:%M}"
-    n = fmt_mult(token_mult)
+    start, end = view.window.start, view.window.end
+    when = f"{start:%d %b %H:%M} → {end:%d %b %H:%M}"
     body = [
-        f"  {pal.dim(reset)}  ·  {when}",
-        f"  {week_bar}  {pal.dim(_window_caption(view.start, view.end, now))}",
+        f"  {pal.dim(view.window.label)}  ·  {when}",
+        # Both bars are drawn and both are labelled: they look identical but
+        # mean different things, and reading one for the other is the
+        # difference between "82% spent" and "82% of the week has passed".
+        f"  {pal.dim('elapsed')} {pal.cyan(bar(_window_frac(start, end, now), 20))}"
+        f"  {pal.dim(_window_caption(start, end, now))}",
+    ]
+    if view.meter is not None:
+        body.append(f"  {pal.dim('used   ')} {_meter_bar(view.meter, pal)}")
+    if view.source:
+        body.append(f"  {pal.dim(view.source)}")
+    body += [
         "",
         f"  {pal.bold(compact_count(b.total) + ' tokens')}   {pal.dim(fmt_int(b.calls) + ' calls')}",
         _mix_row("cache hit", b.cache_read, b.total, pal, "read"),
@@ -237,110 +318,102 @@ def render_provider(
         _mix_row("uncached", b.uncached, b.total, pal, "fresh"),
         _mix_row("output", b.output, b.total, pal, "out"),
         "",
-        f"  {pal.dim(_pad('API list', 16))} {pal.yellow(pal.bold(f'{fmt_money(b.native_usd):>10}'))}",
-        _money_row(pal, "Flash  1×", flash_1x, _cheaper(b.native_usd, flash_1x)),
     ]
-    if abs(token_mult - 1.0) > 1e-9:
+    if view.prices:
         body.append(
-            _money_row(
-                pal,
-                f"Flash  ×{n}",
-                flash_nx,
-                f"if it burns {n}× the tokens",
-            )
+            f"  {pal.dim(_pad('API list', 16))}"
+            f" {pal.yellow(pal.bold(f'{fmt_money(b.native_usd):>10}'))}"
         )
-    body.extend(
-        [
-            _money_row(pal, "Pro    1×", pro_1x, "RunInfra"),
-            _models_line(b, pal),
-        ]
-    )
-    return _box(view.title, body, pal, accent=view.key)
+    body += models_lines(b, pal, name_col, view.prices)
+    return _box(view.title, body, pal, width, accent=view.key)
+
+
+def _meter_bar(meter: Meter, pal: Palette) -> str:
+    """The provider's own reading, or an empty gauge saying it gave none."""
+    if meter.used is None:
+        return f"{pal.dim(bar(0.0, 20))}  {pal.dim(meter.note)}"
+    caption = f"{meter.used * 100:.0f}%"
+    if meter.note:
+        caption += f" · {meter.note}"
+    return f"{pal.cyan(bar(meter.used, 20))}  {pal.dim(caption)}"
 
 
 def render_header(
-    now: datetime,
-    flash: Rates,
-    pro: Rates,
-    token_mult: float,
-    custom: bool,
-    pal: Palette,
+    now: datetime, custom: bool, weeks: int, pal: Palette, width: int
 ) -> str:
     stamp = now.strftime("%a %d %b %Y  %H:%M %Z")
-    mode = "Custom range on every provider." if custom else "Each provider has its own weekly reset."
-    n = fmt_mult(token_mult)
-    body = [
-        f"  {pal.bold(stamp)}",
-        f"  {pal.dim(mode)}",
-        f"  {pal.dim(f'Flash RunInfra  ${flash.input}/${flash.cache_read}/${flash.output}')}",
-        f"  {pal.dim(f'Pro   RunInfra  ${pro.input}/${pro.cache_read}/${pro.output}')}",
-        f"  {pal.dim(f'Flash ×{n} scales every bucket (extra loops grow the cache too).')}",
-    ]
-    return _box("Token recap", body, pal)
+    plain = not custom and weeks == 1
+    if custom:
+        mode = "Custom range on every provider."
+    elif weeks > 1:
+        mode = f"The last {weeks} weeks, to each provider's own reset."
+    else:
+        mode = "Each provider's own weekly window."
+    source = "'logged' is read from the provider; 'local' is an observed clock."
+    priced = "API list $ = what these tokens would cost at the provider's"
+    caveat = "own list rate, per model. Not what you actually paid."
+    body = [f"  {pal.bold(stamp)}", f"  {pal.dim(mode)}"]
+    if plain:
+        body.append(f"  {pal.dim(source)}")
+    body.append(f"  {pal.dim(priced)}")
+    body.append(f"  {pal.dim(caveat)}")
+    return _box("Token recap", body, pal, width)
 
 
 def render_summary(
     views: list[ProviderView],
     combined: TokenBuckets,
-    flash: Rates,
-    pro: Rates,
-    token_mult: float,
     pal: Palette,
+    width: int,
 ) -> str:
-    n = fmt_mult(token_mult)
-    flash_1x = _bucket_cost(flash, combined)
-    flash_nx = flash_1x * token_mult
-    pro_1x = _bucket_cost(pro, combined)
-    header = (
-        f"  {'':<8}{'tokens':>7} {'API':>8} {'Flash':>8} "
-        f"{('×' + n):>8} {'Pro':>8}"
-    )
-    rule = pal.dim("  " + "─" * 50)
+    header = f"  {'':<8}{'tokens':>8}  {'API list':>12}"
+    rule = pal.dim("  " + "─" * 30)
     rows = [pal.dim(header), rule]
     for view in views:
-        f1 = _bucket_cost(flash, view.buckets)
-        p1 = _bucket_cost(pro, view.buckets)
-        name = view.key.capitalize()
         rows.append(
-            f"  {name:<8}{compact_count(view.buckets.total):>7} "
-            f"{pal.yellow(f'{fmt_money(view.buckets.native_usd):>8}')} "
-            f"{pal.green(f'{fmt_money(f1):>8}')} "
-            f"{pal.green(f'{fmt_money(f1 * token_mult):>8}')} "
-            f"{pal.green(f'{fmt_money(p1):>8}')}"
+            f"  {view.summary_name:<8}{compact_count(view.buckets.total):>8}  "
+            f"{pal.yellow(f'{fmt_money(view.buckets.native_usd):>12}')}"
         )
     rows.append(rule)
     rows.append(
-        f"  {pal.bold(_pad('total', 8))}{pal.bold(f'{compact_count(combined.total):>7}')} "
-        f"{pal.yellow(pal.bold(f'{fmt_money(combined.native_usd):>8}'))} "
-        f"{pal.green(pal.bold(f'{fmt_money(flash_1x):>8}'))} "
-        f"{pal.green(pal.bold(f'{fmt_money(flash_nx):>8}'))} "
-        f"{pal.green(pal.bold(f'{fmt_money(pro_1x):>8}'))}"
-    )
-    rows.append(
-        pal.dim(f"  ×{n} = Flash if it spends {n}× tokens on the same task.")
+        f"  {pal.bold(_pad('total', 8))}"
+        f"{pal.bold(f'{compact_count(combined.total):>8}')}  "
+        f"{pal.yellow(pal.bold(f'{fmt_money(combined.native_usd):>12}'))}"
     )
     rows.append("")
     rows.append(pal.dim("  Local logs, not the subscription meter. Compare token"))
     rows.append(pal.dim("  totals (or API list $) with the % used in each web UI."))
-    return _box("Snapshot", rows, pal)
+    return _box("Snapshot", rows, pal, width)
 
 
 def render_report(
     now: datetime,
-    flash: Rates,
-    pro: Rates,
-    token_mult: float,
     custom: bool,
+    weeks: int,
     views: list[ProviderView],
     combined: TokenBuckets,
     color: bool | None = None,
 ) -> str:
     pal = Palette(color_enabled(color))
-    chunks = [render_header(now, flash, pro, token_mult, custom, pal)]
+    # Each table sizes its own name column to its own longest model, so a
+    # section of short names is not stretched by some other section's long
+    # ones. The boxes still share one width — trailing space inside a narrow
+    # table costs nothing, whereas ragged boxes are hard to read down.
+    name_cols = {id(view): _name_col(view) for view in views}
+    width = max(
+        [MIN_BOX] + [2 + name_cols[id(view)] + _cols(view) + 2 for view in views]
+    )
+    chunks = [render_header(now, custom, weeks, pal, width)]
     chunks.extend(
-        render_provider(view, now, flash, pro, token_mult, pal) for view in views
+        render_provider(view, now, pal, width, name_cols[id(view)]) for view in views
     )
-    chunks.append(
-        render_summary(views, combined, flash, pro, token_mult, pal)
-    )
+    chunks.append(render_summary(views, combined, pal, width))
     return "\n".join(chunks) + "\n"
+
+
+def _name_col(view: ProviderView) -> int:
+    return max([len("model")] + [len(name) for name in model_names(view.buckets)])
+
+
+def _cols(view: ProviderView) -> int:
+    return _COUNT_COLS + (_PRICE_COLS if view.prices else 0)

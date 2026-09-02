@@ -84,4 +84,5 @@ def _read_claude_jsonl(
                     model, uncached, write_5m, write_1h, cache_read, output
                 ),
                 model=model,
+                provider="anthropic",
             )

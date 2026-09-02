@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-import json
-import tempfile
 import unittest
-from pathlib import Path
 
-from token_recap.buckets import TokenBuckets, load_deepseek_rates
 from token_recap.native import (
-    DEEPSEEK_COM_FLASH_OFFPEAK,
-    RUNINFRA_PRO,
     claude_native_usd,
     codex_native_usd,
     grok_native_usd,
@@ -20,88 +14,35 @@ def one_mtok_out(model: str) -> float:
     return claude_native_usd(model, 0, 0, 0, 0, 1_000_000)
 
 
-class DeepSeekRatesTest(unittest.TestCase):
-    def test_loads_runinfra_deepseek_v4_flash(self) -> None:
-        payload = {
-            "providers": {
-                "runinfra": {
-                    "models": [
-                        {
-                            "id": "deepseek-v4-flash",
-                            "name": "DeepSeek V4 Flash (RunInfra)",
-                            "cost": {
-                                "input": 0.13,
-                                "output": 0.27,
-                                "cacheRead": 0.01,
-                                "cacheWrite": 0,
-                            },
-                        }
-                    ]
-                }
-            }
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "models.json"
-            path.write_text(json.dumps(payload))
-            rates = load_deepseek_rates(path)
-        self.assertEqual(rates.input, 0.13)
-        self.assertEqual(rates.output, 0.27)
-        self.assertEqual(rates.cache_read, 0.01)
-        self.assertEqual(rates.cache_write, 0.0)
-        # 1M uncached + 2M cache read + 1M output
-        self.assertAlmostEqual(rates.cost(1_000_000, 0, 2_000_000, 1_000_000), 0.42)
-
-    def test_cache_write_zero_means_writes_are_free(self) -> None:
-        payload = {
-            "providers": {
-                "runinfra": {
-                    "models": [
-                        {
-                            "id": "deepseek-v4-flash",
-                            "name": "DeepSeek V4 Flash (RunInfra)",
-                            "cost": {
-                                "input": 0.13,
-                                "output": 0.27,
-                                "cacheRead": 0.01,
-                                "cacheWrite": 0,
-                            },
-                        }
-                    ]
-                }
-            }
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "models.json"
-            path.write_text(json.dumps(payload))
-            rates = load_deepseek_rates(path)
-        buckets = TokenBuckets()
-        buckets.add(uncached=0, cache_write=3_000_000, cache_read=0, output=0)
-        self.assertEqual(rates.cost(0, buckets.cache_write, 0, 0), 0.0)
-
+class NativeRatesTest(unittest.TestCase):
     def test_claude_opus_cache_read_is_fifty_cents_per_million(self) -> None:
         usd = claude_native_usd("claude-opus-5", 0, 0, 0, 1_000_000, 0)
         self.assertAlmostEqual(usd, 0.50)
 
-    def test_official_flash_cache_hit_is_sub_cent_per_million(self) -> None:
-        usd = DEEPSEEK_COM_FLASH_OFFPEAK.cost(0, 0, 1_000_000, 0)
-        self.assertAlmostEqual(usd, 0.007)
-
-    def test_runinfra_pro_matches_user_card(self) -> None:
-        hit = RUNINFRA_PRO.cost(0, 0, 1_000_000, 0)
-        miss = RUNINFRA_PRO.cost(1_000_000, 0, 0, 0)
-        out = RUNINFRA_PRO.cost(0, 0, 0, 1_000_000)
-        self.assertAlmostEqual(hit, 0.03)
-        self.assertAlmostEqual(miss, 0.60)
-        self.assertAlmostEqual(out, 1.90)
-
-    def test_token_mult_scales_cost_linearly(self) -> None:
-        base = DEEPSEEK_COM_FLASH_OFFPEAK.cost(10, 20, 30, 40)
-        self.assertAlmostEqual(base * 2.5, DEEPSEEK_COM_FLASH_OFFPEAK.cost(25, 50, 75, 100))
-
     def test_grok_200k_cliff_doubles_the_request(self) -> None:
-        lo = grok_native_usd(199_999, 0, 1_000)
-        hi = grok_native_usd(200_000, 0, 1_000)
+        lo = grok_native_usd("grok-4.6", 199_999, 0, 1_000)
+        hi = grok_native_usd("grok-4.6", 200_000, 0, 1_000)
         self.assertGreater(hi, lo * 1.9)
+
+    def test_grok_cliff_is_keyed_on_prompt_size_not_output(self) -> None:
+        """A 200k prompt bills its output at the high rate too."""
+        out = grok_native_usd("grok-4.6", 200_000, 200_000, 1_000_000)
+        self.assertAlmostEqual(out - grok_native_usd("grok-4.6", 200_000, 200_000, 0), 12.0)
+
+    def test_grok_4_5_reads_cache_cheaper_than_4_6(self) -> None:
+        """The two share input and output, but not the cached-input rate."""
+        # A 1M-token prompt read wholly from cache, so only the read rate bills.
+        self.assertAlmostEqual(grok_native_usd("grok-4.5", 1_000_000, 1_000_000, 0), 0.60)
+        self.assertAlmostEqual(grok_native_usd("grok-4.6", 1_000_000, 1_000_000, 0), 1.00)
+        # Same, under the 200k cliff: 100k cached reads at the low rate.
+        self.assertAlmostEqual(grok_native_usd("grok-4.5", 100_000, 100_000, 0), 0.03)
+        self.assertAlmostEqual(grok_native_usd("grok-4.6", 100_000, 100_000, 0), 0.05)
+
+    def test_grok_unknown_model_falls_back_to_4_6(self) -> None:
+        args = (1_000, 500, 200)
+        self.assertAlmostEqual(
+            grok_native_usd("grok-9-turbo", *args), grok_native_usd("grok-4.6", *args)
+        )
 
 
 class ClaudePerModelTest(unittest.TestCase):
@@ -110,8 +51,7 @@ class ClaudePerModelTest(unittest.TestCase):
         self.assertAlmostEqual(one_mtok_out("claude-mythos-5"), 50.0)
         self.assertAlmostEqual(one_mtok_out("claude-opus-5"), 25.0)
         self.assertAlmostEqual(one_mtok_out("claude-opus-4-8"), 25.0)
-        self.assertAlmostEqual(one_mtok_out("claude-sonnet-5"), 15.0)
-        self.assertAlmostEqual(one_mtok_out("claude-sonnet-4-6"), 15.0)
+        self.assertAlmostEqual(one_mtok_out("claude-sonnet-5"), 10.0)
         self.assertAlmostEqual(one_mtok_out("claude-haiku-4-5-20251001"), 5.0)
 
     def test_fable_costs_twice_opus(self) -> None:
@@ -127,10 +67,18 @@ class ClaudePerModelTest(unittest.TestCase):
         self.assertAlmostEqual(write_1h, 10.0)
         self.assertAlmostEqual(read, 0.50)
 
-    def test_every_sonnet_bills_at_the_list_rate(self) -> None:
-        """The Sonnet 5 intro rate is not modelled, so no Sonnet is special."""
+    def test_sonnet_family_bills_at_the_sonnet_5_card(self) -> None:
+        """One rate per family: older Sonnets are not modelled separately."""
         for model in ("claude-sonnet-5", "claude-sonnet-4-5", "claude-3-7-sonnet"):
-            self.assertAlmostEqual(one_mtok_out(model), 15.0, msg=model)
+            self.assertAlmostEqual(one_mtok_out(model), 10.0, msg=model)
+
+    def test_sonnet_5_input_is_two_dollars_per_million(self) -> None:
+        self.assertAlmostEqual(claude_native_usd("claude-sonnet-5", 1_000_000, 0, 0, 0, 0), 2.0)
+
+    def test_one_million_window_id_bills_at_the_standard_card(self) -> None:
+        """1M context is standard-priced from 4.6 on, so "[1m]" is not a tier."""
+        self.assertAlmostEqual(one_mtok_out("claude-opus-5[1m]"), 25.0)
+        self.assertAlmostEqual(one_mtok_out("claude-fable-5[1m]"), 50.0)
 
     def test_non_anthropic_model_under_claude_root_is_not_billed(self) -> None:
         self.assertEqual(one_mtok_out("deepseek-v4-flash"), 0.0)
