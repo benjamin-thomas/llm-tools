@@ -32,6 +32,8 @@
 # ~/.cache rw, ~/.local ro, audio devices, the project dir rw.
 
 require "fileutils"
+require "json"
+require "open3"
 require "optparse"
 require "shellwords"
 require "tmpdir"
@@ -122,6 +124,10 @@ parser = OptionParser.new do |opts|
   opts.separator ""
   opts.separator "--mux tmux swaps herdr back for tmux — the multiplexer tmux-orchestrator"
   opts.separator "below drives."
+  opts.separator ""
+  opts.separator "herdr launches made from inside a host tmux session are recorded in"
+  opts.separator "~/.local/state/sandbox-agent (removed on exit) so the host-side companion"
+  opts.separator "`herdr-hub` can flag which tmux session's agent needs attention."
   opts.separator ""
   opts.separator "Examples:"
   opts.separator "  sandbox-agent . -- claude-yolo"
@@ -330,6 +336,13 @@ when "herdr"
   # A sandbox session is one workspace with a pane or two, so the sidebar is
   # mostly listing what is already on screen: it starts collapsed, and
   # prefix+b brings it back.
+  #
+  # window_title mirrors the focused agent's own OSC title out to the host
+  # tmux (which records it as pane_title, visible in the expanded session
+  # switcher): the working spinner for claude, "Action Required" for agents
+  # that title their blocked state. The default "{hostname}: {workspace}"
+  # would discard exactly that signal. Note "done" never appears in any
+  # title — herdr derives it — so herdr-hub, not the title, answers that.
   config = File.join(socket_dir, "config.toml")
   File.write(config, <<~TOML)
     onboarding = false
@@ -344,6 +357,7 @@ when "herdr"
     last_pane = "prefix+l"
     [ui]
     sidebar_start_collapsed = true
+    window_title = "{terminal_title} | {workspace}"
     [terminal]
     default_shell = "#{launcher}"
   TOML
@@ -359,6 +373,33 @@ if mux_socket
   warn "Sandbox #{flags[:mux]} socket: #{mux_socket}"
   warn "Attach from another terminal:  #{attach_hint}"
   warn "---"
+end
+
+# --- host-side registry for herdr-hub ---
+#
+# Recorded now, on the host, because both facts stop being knowable later:
+# which tmux session this launch came from (gone once bwrap starts), and where
+# the sandboxed herdr socket lives (the sandbox must never learn the mapping).
+# It goes under ~/.local/state — outside every sandbox mount — because
+# herdr-hub feeds these values into host tmux commands, and anything under
+# socket_dir is agent-writable.
+if flags[:mux] == "herdr" && ENV["TMUX"]
+  fmt = '#S|#{window_id}' # tmux format tokens, not Ruby interpolation
+  out, _err, tmux_status = Open3.capture3("tmux", "display-message", "-p", fmt)
+  session, window_id = out.strip.split("|", 2) if tmux_status.success?
+  unless session.to_s.empty?
+    registry_dir = File.join(home, ".local", "state", "sandbox-agent")
+    FileUtils.mkdir_p(registry_dir)
+    registry_entry = File.join(registry_dir, "#{File.basename(socket_dir)}.json")
+    File.write(registry_entry, JSON.generate(
+      project: project_dir,
+      tmux_session: session,
+      tmux_window_id: window_id,
+      herdr_socket: mux_socket,
+      pid: Process.pid
+    ))
+    at_exit { FileUtils.rm_f(registry_entry) }
+  end
 end
 
 args.push("--", *cmd)

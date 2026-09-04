@@ -1,0 +1,203 @@
+#!/usr/bin/env ruby
+
+# Symlink to your ~/.local/bin/ directory
+#
+# Host-side companion to sandbox-agent: answers "which sandboxed agent needs
+# me?" from outside every sandbox. It works because the segmentation is
+# one-way by construction — each sandbox reaches only its own herdr server,
+# but every private socket lives on the host (sandbox-agent's mktmpdir), and
+# each launch made from inside tmux records {project, tmux session, socket}
+# in ~/.local/state/sandbox-agent, a directory no sandbox mounts. Nothing
+# here adds a mount or a capability inside any sandbox.
+#
+# Trust boundary: everything a sandboxed herdr server answers is
+# agent-controlled. Only the fixed MARKERS strings below are ever handed to
+# tmux — agent-supplied text (titles, cwds) is never interpolated into a tmux
+# command or format. The registry values fed to tmux (session name, window
+# id) were written by the host launcher, not by the sandbox.
+#
+# Usage:
+#   herdr-hub refresh   set/clear @sandbox_attn on the tmux sessions and
+#                         windows that sandboxes were launched from
+#   herdr-hub status    one line for the tmux status bar (empty when quiet)
+#   herdr-hub list      one row per agent needing attention (--all: everything)
+#   herdr-hub tmux      print the ~/.tmux.conf snippet that displays flags
+
+require "json"
+require "open3"
+
+STATE_DIR = ENV["SANDBOX_AGENT_STATE_DIR"] || File.expand_path("~/.local/state/sandbox-agent")
+
+# Worst first — and exactly the states herdr plays a notification sound for:
+# blocked fires the needs-attention/request sound, done fires the finished
+# sound. idle is deliberately absent: it means "finished while you were
+# watching that pane", which herdr keeps silent, and the hub follows its
+# lead. working and unknown likewise earn nothing.
+MARKERS = {
+  "blocked" => "⚠ blocked",
+  "done"    => "● done",
+}.freeze
+
+def marker_for(states)
+  key = MARKERS.keys.find { |k| states.include?(k) }
+  key && MARKERS[key]
+end
+
+# One short-lived CLI query, never a client attach: attaching would run the
+# sandboxed server's default_shell and hand it a full terminal to draw on.
+def query_agents(socket)
+  env = { "HERDR_SOCKET_PATH" => socket }
+  out, _err, status = Open3.capture3(env, "timeout", "2", "herdr", "agent", "list")
+  return nil unless status.success?
+
+  agents = JSON.parse(out).dig("result", "agents")
+  agents&.map do |a|
+    { "status" => a["agent_status"].to_s,
+      "tab"    => a["tab_id"].to_s,
+      "agent"  => a["agent"].to_s,
+      "title"  => a["terminal_title_stripped"].to_s }
+  end
+rescue JSON::ParserError
+  nil
+end
+
+def entries
+  Dir.glob(File.join(STATE_DIR, "*.json")).filter_map do |path|
+    begin
+      entry = JSON.parse(File.read(path))
+    rescue StandardError
+      next
+    end
+
+    socket = entry["herdr_socket"]
+    # A missing socket means the sandbox is gone and its launcher never got
+    # to clean up (crash, SIGKILL). Prune here so flags cannot outlive it.
+    unless socket && File.socket?(socket)
+      File.delete(path) rescue nil
+      next
+    end
+
+    agents = query_agents(socket)
+    next if agents.nil? # unreachable right now (starting up?) — keep the file
+
+    entry.merge("agents" => agents,
+                "marker" => marker_for(agents.map { |a| a["status"] }))
+  end
+end
+
+def tmux(*argv)
+  _out, _err, status = Open3.capture3("tmux", *argv)
+  status.success?
+end
+
+def tmux_lines(*argv)
+  out, _err, status = Open3.capture3("tmux", *argv)
+  status.success? ? out.lines(chomp: true) : nil
+end
+
+# Make tmux match reality exactly: every session and window either carries
+# the marker its live sandboxes earn, or has @sandbox_attn unset. Sweeping
+# all of them (not just registered ones) is what clears a flag whose sandbox
+# exited between refreshes.
+def refresh
+  sessions = tmux_lines("list-sessions", "-F", "#S")
+  abort "herdr-hub: no tmux server" if sessions.nil?
+  windows = tmux_lines("list-windows", "-a", "-F", '#{window_id}') || []
+
+  states_by_session = Hash.new { |h, k| h[k] = [] }
+  states_by_window  = Hash.new { |h, k| h[k] = [] }
+  entries.each do |e|
+    statuses = e["agents"].map { |a| a["status"] }
+    states_by_session[e["tmux_session"]].concat(statuses)
+    states_by_window[e["tmux_window_id"]].concat(statuses) if e["tmux_window_id"]
+  end
+
+  # No "=" exact-match prefix: tmux 3.2a's set-option rejects it ("no such
+  # session"). Bare names are still safe — exact matches win before prefix
+  # matching, and session names cannot contain ":" or ".".
+  sessions.each do |name|
+    apply_flag(["-t", name], marker_for(states_by_session[name]))
+  end
+  # A different option name than the session's: format lookup falls back to
+  # the session option when a window has none, so a shared name would paint
+  # every window in a flagged session. A window-only name keeps window rows
+  # honest — the flag appears only on the window the agent actually runs in.
+  windows.each do |window_id|
+    apply_flag(["-w", "-t", window_id], marker_for(states_by_window[window_id]), option: "@sandbox_attn_w")
+  end
+end
+
+def apply_flag(target, marker, option: "@sandbox_attn")
+  if marker
+    tmux("set-option", *target, option, marker)
+  else
+    tmux("set-option", *target, "-u", option)
+  end
+end
+
+def status_line
+  parts = entries.filter_map do |e|
+    next unless e["marker"]
+
+    glyph = e["marker"].split(" ").first
+    name = File.basename(e["project"].to_s).gsub(/[^[:print:]]/, "")
+    "#{glyph} #{name}"
+  end
+  # ## because tmux expands the status bar as a format string.
+  parts.join("  ").gsub("#", "##")
+end
+
+# One row per agent, not per sandbox: an aggregate like "idle,done" told you
+# a sandbox both had an agent waiting and one you were already talking to,
+# without saying which was which. Attention rows only, unless --all.
+def list(all: false)
+  rows = entries.flat_map do |e|
+    e["agents"].filter_map do |a|
+      next unless all || MARKERS.key?(a["status"])
+
+      [File.basename(e["project"].to_s), e["tmux_session"].to_s,
+       a["tab"], a["agent"], a["status"], printable(a["title"])[0, 40]]
+    end
+  end
+  return puts(all ? "No live agents." : "Nothing needs attention.") if rows.empty?
+
+  rows.sort_by! { |row| MARKERS.keys.index(row[4]) || MARKERS.size }
+  rows.unshift(%w[PROJECT SESSION TAB AGENT STATE TITLE])
+  widths = rows.transpose.map { |col| col.map(&:length).max }
+  rows.each do |row|
+    puts row.each_with_index.map { |cell, i| cell.ljust(widths[i]) }.join("  ").rstrip
+  end
+end
+
+# Titles come from inside a sandbox — agent-controlled bytes. Non-printables
+# (including ESC) are stripped before anything reaches the terminal.
+def printable(text) = text.to_s.gsub(/[^[:print:]]/, "")
+
+TMUX_SNIPPET = <<~'CONF'
+  # --- herdr-hub: show which sandboxed agent needs attention ---------------
+  # Session switcher with attention flags, refreshed each time it opens.
+  # (add -b to run-shell if the brief pause before the tree opens bothers you)
+  bind s run-shell '~/.local/bin/herdr-hub refresh' \; choose-tree -Zs -F '#{?pane_format,#{pane_current_command} "#{pane_title}",#{?window_format,#{window_name}#{window_flags}#{?#{@sandbox_attn_w}, #{@sandbox_attn_w},} "#{pane_title}",#{session_windows} windows#{?session_attached, (attached),}#{?#{@sandbox_attn}, #{@sandbox_attn},}}}'
+
+  # Optional: live summary in every session's status bar. Two gotchas: the
+  # stock status-right already fills the default status-right-length (40), so
+  # raise it, and put the hub summary first so truncation eats the clock,
+  # never the flags.
+  # set -g status-interval 15
+  # set -g status-right-length 100
+  # set -g status-right '#(~/.local/bin/herdr-hub status)  "#{=21:pane_title}" %H:%M %d-%b-%y'
+CONF
+
+case ARGV.first
+when "refresh" then refresh
+when "status"  then puts status_line
+when "list"    then list(all: ARGV.include?("--all"))
+when "tmux"    then puts TMUX_SNIPPET
+else
+  abort <<~TEXT
+    Usage: herdr-hub refresh|status|list|tmux
+
+    Flags host tmux sessions whose sandboxed agent (sandbox-agent + herdr)
+    is blocked or done. Run `herdr-hub tmux` for the config snippet.
+  TEXT
+end
