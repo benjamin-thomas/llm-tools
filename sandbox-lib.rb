@@ -567,13 +567,10 @@ module SandboxLib
     args.push(*rw(kimi_dir))        if File.directory?(kimi_dir)
     args.push(*rw(kimi_config_dir)) if File.directory?(kimi_config_dir)
     args.push(*rw(kimi_code_dir))   if File.directory?(kimi_code_dir)
-    # Kimi user skills live in ~/.agents/skills as symlinks into this repo's
-    # global-skills. Mount rw, not ro: llm-skills install/import manage those links,
-    # and skills are curated from inside a sandbox session. ~/.claude and ~/.codex
-    # are already rw above, so a ro mount here made kimi the one CLI whose skills
-    # could not be installed without leaving the sandbox (EROFS on symlink create).
-    # Pairs with the rw global-skills overlay below — editing a skill needs the
-    # content writable, (re)installing one needs the link directory writable.
+    # ~/.agents/skills holds the user-level skills that Kimi, Codex and the other
+    # non-Claude CLIs read (herdr installs its own there). Mount rw, not ro:
+    # installing or updating a skill from inside a sandbox session writes there,
+    # and ~/.claude and ~/.codex are already rw above (EROFS otherwise).
     agents_dir = "#{home}/.agents"
     args.push(*rw(agents_dir)) if File.directory?(agents_dir)
     opencode_cfg = "#{home}/.config/opencode"
@@ -710,30 +707,18 @@ module SandboxLib
     args.push(*ro(wakatime_cfg)) if File.exist?(wakatime_cfg)
     args.push(*rw(wakatime_dir)) if File.directory?(wakatime_dir)
 
-    # The llm-tools repo backs a set of ~/.local/bin tools and CLI skills through
-    # symlinks that resolve back into it: tmux-orchestrator (+ tmux_orchestrator.py),
-    # llm-skills, and the per-CLI skills under ~/.claude/skills, ~/.codex/skills,
-    # ~/.agents/skills, etc. Mount the repo root ro so those symlinks resolve inside
-    # the sandbox AND the coordinator can invoke tmux-orchestrator at runtime.
-    # Skipped when the sandboxed project already covers the repo (it is the repo, or
-    # a parent/child of it) to avoid a conflicting double bind. global-skills is a
-    # subpath, so the skill symlinks are covered by this single mount.
+    # Some host tools are symlinks back into the llm-tools repo, and they must still
+    # resolve inside the sandbox: ~/.claude/statusline.rb, which Claude Code runs
+    # there, and the herdr-hub / herdr-tray / sandbox-agent entries in ~/.local/bin.
+    # Mount the repo root ro for them. Skipped when the sandboxed project already
+    # covers the repo (it is the repo, or a parent/child of it) to avoid a
+    # conflicting double bind.
     llm_tools_root = "#{home}/code/github.com/benjamin-thomas/llm-tools"
     llm_tools_covered =
       project_dir == llm_tools_root ||
       project_dir.start_with?("#{llm_tools_root}/") ||
       llm_tools_root.start_with?("#{project_dir}/")
     args.push(*ro(llm_tools_root)) if File.directory?(llm_tools_root) && !llm_tools_covered
-
-    # global-skills stays writable even though the repo around it is ro: skills are
-    # edited from inside a sandbox session, and a ro mount makes that impossible
-    # without leaving the sandbox. Later mounts win in bwrap, so this rw bind
-    # overlays the ro repo mount above. When the sandboxed project *is* llm-tools
-    # the rw project mount below already covers it, hence the same guard.
-    global_skills_dir = "#{llm_tools_root}/global-skills"
-    if File.directory?(global_skills_dir) && !llm_tools_covered
-      args.push(*rw(global_skills_dir))
-    end
 
     cache_dir = "#{home}/.cache"
     args.push(*rw(cache_dir))    if File.directory?(cache_dir)
