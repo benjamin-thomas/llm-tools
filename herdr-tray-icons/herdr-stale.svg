@@ -1,0 +1,5 @@
+<!-- herdr-hub could not answer. Hollow on purpose: this is the one state that
+     must not look like a reassuring filled dot, whatever the colours render as. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <circle cx="11" cy="11" r="6" fill="none" stroke="#77767b" stroke-width="2"/>
+</svg>

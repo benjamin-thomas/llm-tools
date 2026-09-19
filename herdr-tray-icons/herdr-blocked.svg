@@ -1,0 +1,6 @@
+<!-- Someone is waiting on you: the ring is what separates this from "done"
+     for a red/amber-confusing eye, since the counter cannot tell them apart. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <circle cx="11" cy="11" r="9" fill="none" stroke="#e01b24" stroke-width="1.5"/>
+  <circle cx="11" cy="11" r="5" fill="#e01b24"/>
+</svg>

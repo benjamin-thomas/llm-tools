@@ -21,6 +21,8 @@
 #                         windows that sandboxes were launched from
 #   herdr-hub status    one line for the tmux status bar (empty when quiet)
 #   herdr-hub list      one row per agent needing attention (--all: everything)
+#   herdr-hub json      every live entry with its agents, as JSON (herdr-tray
+#                         reads this; unlike refresh it needs no tmux server)
 #   herdr-hub tmux      print the ~/.tmux.conf snippet that displays flags
 
 require "json"
@@ -61,7 +63,13 @@ rescue JSON::ParserError
   nil
 end
 
-def entries
+# keep_unreachable is for herdr-tray, and only for it. A sandbox whose socket
+# is alive but whose herdr did not answer inside the timeout is dropped
+# everywhere else on purpose: refresh and status would rather say nothing than
+# flap a flag while a sandbox is still booting. The tray cannot afford that
+# silence — its quiet dot is a positive claim ("asked everyone, nobody needs
+# you"), so it has to be able to tell "nobody" from "one never answered".
+def entries(keep_unreachable: false)
   Dir.glob(File.join(STATE_DIR, "*.json")).filter_map do |path|
     begin
       entry = JSON.parse(File.read(path))
@@ -78,7 +86,13 @@ def entries
     end
 
     agents = query_agents(socket)
-    next if agents.nil? # unreachable right now (starting up?) — keep the file
+    if agents.nil? # unreachable right now (starting up?) — keep the file
+      next unless keep_unreachable
+
+      # nil agents, not an empty list: "did not answer" must not read as
+      # "answered, and has nothing running".
+      next entry.merge("agents" => nil, "marker" => nil)
+    end
 
     entry.merge("agents" => agents,
                 "marker" => marker_for(agents.map { |a| a["status"] }))
@@ -192,10 +206,15 @@ case ARGV.first
 when "refresh" then refresh
 when "status"  then puts status_line
 when "list"    then list(all: ARGV.include?("--all"))
+# The one machine-readable surface. GUI companions consume this instead of
+# re-deriving the registry glob, the dead-socket prune and the marker rules;
+# keeping that logic here means the tray and the tmux flags can never disagree
+# about what counts as needing attention.
+when "json"    then puts JSON.generate(entries(keep_unreachable: true))
 when "tmux"    then puts TMUX_SNIPPET
 else
   abort <<~TEXT
-    Usage: herdr-hub refresh|status|list|tmux
+    Usage: herdr-hub refresh|status|list|json|tmux
 
     Flags host tmux sessions whose sandboxed agent (sandbox-agent + herdr)
     is blocked or done. Run `herdr-hub tmux` for the config snippet.

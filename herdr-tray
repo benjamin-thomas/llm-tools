@@ -1,0 +1,351 @@
+#!/usr/bin/python3
+
+# Symlink to your ~/.local/bin/ directory
+#
+# GNOME panel companion to herdr-hub: answers "does anyone need me?" without
+# being asked. herdr-hub is one-shot and everything it prints lands inside
+# tmux, so today the answer is only visible once you are already looking at
+# tmux. This puts the same answer in the top panel.
+#
+# Deliberately passive. Nothing is clickable except Quit, nothing pops up, and
+# no notification fires — herdr already plays a sound for both of these states.
+# You still walk to the agent through tmux, which works well.
+#
+#   small green dot   + "0"   asked everyone, nobody needs you
+#   amber dot         + "n"   n agents finished
+#   red dot in a ring + "n"   at least one agent is blocked (n = blocked + done)
+#   hollow grey ring  + "?"   herdr-hub could not be reached — count unknown
+#
+# The grey ring is the point of the whole design. A green "0" is the only
+# evidence this thing is still running, so it has to be a positive claim — "I
+# asked every sandbox and they all said no" — and never a shrug. Anything that
+# stops us asking shows grey instead, and a count already known to be
+# incomplete prints as "n+": a floor that says it is one.
+#
+# Grey only ever replaces the all-clear. If something is definitely blocked you
+# have to go look anyway, so a partial failure never downgrades red to grey.
+#
+# Trust boundary: everything under an entry's "agents" is whatever a sandboxed
+# herdr server chose to say — titles, and the status string itself (see
+# herdr-hub's header). None of it reaches the panel: the icon and the counter
+# come from matching against a fixed pair of status strings, so the panel
+# renders no sandbox-supplied text at all. Such text appears only as menu
+# labels, stripped of non-printables and length-capped.
+#
+# Usage:
+#   herdr-tray            run the indicator
+#   herdr-tray once       print the state it would show, as JSON, and exit
+#   herdr-tray systemd    print the systemd user unit that runs it at login
+#
+# Install:
+#   ln -s "$PWD/herdr-tray" ~/.local/bin/herdr-tray
+#   herdr-tray systemd > ~/.config/systemd/user/herdr-tray.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now herdr-tray.service
+#
+# The shebang is /usr/bin/python3 and not `env python3` on purpose: only the
+# system interpreter carries the PyGObject typelibs, and a version manager's
+# python3 will shadow it on an interactive PATH.
+
+import json
+import os
+import signal
+import subprocess
+import sys
+
+# realpath() is load-bearing: __file__ is the ~/.local/bin symlink, and the
+# icons sit next to the target rather than next to the link.
+ICON_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "herdr-tray-icons")
+
+HUB = os.environ.get("HERDR_HUB", "herdr-hub")
+INTERVAL = int(os.environ.get("HERDR_TRAY_INTERVAL", "5"))
+# herdr-hub queries each sandbox serially under its own `timeout 2`, so this
+# cap has to grow with how many you run. Blowing it yields grey, never a hang.
+HUB_TIMEOUT = float(os.environ.get("HERDR_TRAY_TIMEOUT", "30"))
+
+QUIET, DONE, BLOCKED, UNKNOWN = "quiet", "done", "blocked", "unknown"
+
+# Mirrors herdr-hub's MARKERS, worst first, and for the same reason: these are
+# exactly the states herdr itself plays a notification sound for. idle is
+# absent because it means "finished while you were watching that pane".
+# Following the hub's lead keeps one definition of "needs attention" shared by
+# the tray and the tmux flags — they can disagree about nothing.
+ATTENTION = ("blocked", "done")
+GLYPHS = {"blocked": "⚠", "done": "●"}
+
+# Four names, four files — never one name whose bytes we rewrite. The shell
+# caches a rendered icon under `${name}@${size}${themePath}`, so only a change
+# of name repaints the panel.
+ICONS = {QUIET: "herdr-quiet", DONE: "herdr-done",
+         BLOCKED: "herdr-blocked", UNKNOWN: "herdr-stale"}
+
+
+def printable(text, limit=48):
+    """herdr-hub's printable(), in Python, with a length cap.
+
+    Two things to stop. Control bytes: a NUL is not even legal in a D-Bus
+    string and would take the whole menu export down with it, and an ESC would
+    reach a real terminal if one of these lines is ever logged. And length: a
+    4KB "title" would stretch the menu off the screen. str.isprintable() is the
+    closest Python has to Ruby's [[:print:]] — it rejects control characters
+    and every separator except a plain space.
+    """
+    text = text if isinstance(text, str) else ""
+    return "".join(ch for ch in text if ch.isprintable())[:limit]
+
+
+def state(level, rows, note):
+    return {"level": level, "count": len(rows), "rows": rows, "note": note}
+
+
+def compute_state(payload):
+    """Fold `herdr-hub json` output into what the panel shows.
+
+    Total over any parsed JSON: this is a wire format arriving from another
+    process, not a type we control.
+    """
+    if not isinstance(payload, list):
+        return state(UNKNOWN, [], f"{HUB} json was not a list")
+
+    rows, silent = [], 0
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        agents = entry.get("agents")
+        # null, not []: the hub is telling us the socket is alive but its herdr
+        # never answered. That is the case a green 0 would lie about.
+        if agents is None:
+            silent += 1
+            continue
+        if not isinstance(agents, list):
+            continue
+        project = printable(os.path.basename(str(entry.get("project", "")))) or "?"
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            status = printable(agent.get("status"), 16)
+            # Membership, not trust. A sandbox can put any string here, and
+            # anything outside this pair simply is not attention. Claiming
+            # "blocked" while not blocked buys nothing — it could just block.
+            if status in ATTENTION:
+                rows.append({"project": project, "status": status,
+                             "title": printable(agent.get("title"))})
+
+    rows.sort(key=lambda row: ATTENTION.index(row["status"]))  # worst first
+    note = "" if not silent else \
+        f"{silent} sandbox{'es' if silent > 1 else ''} not answering"
+
+    if any(row["status"] == "blocked" for row in rows):
+        level = BLOCKED
+    elif rows:
+        level = DONE
+    else:
+        # A silent sandbox only ever demotes the all-clear.
+        level = UNKNOWN if silent else QUIET
+    return state(level, rows, note)
+
+
+def poll():
+    """Ask herdr-hub. Never raises: every failure becomes the grey state,
+    carrying a note saying which failure it was.
+
+    Shelling out rather than re-reading the registry is the whole point. The
+    glob, the dead-socket prune, the per-sandbox query and the blocked/done
+    rules all live in herdr-hub, already covered by its tests.
+    """
+    try:
+        out = subprocess.run([HUB, "json"], capture_output=True, text=True,
+                             timeout=HUB_TIMEOUT, check=True).stdout
+    except FileNotFoundError:
+        return state(UNKNOWN, [], f"{HUB} not on PATH")
+    except subprocess.TimeoutExpired:
+        return state(UNKNOWN, [], f"{HUB} json timed out after {HUB_TIMEOUT:g}s")
+    except subprocess.CalledProcessError as exc:
+        return state(UNKNOWN, [], f"{HUB} json exited {exc.returncode}")
+    except OSError as exc:
+        return state(UNKNOWN, [], f"{HUB} json failed: {exc.strerror}")
+
+    try:
+        return compute_state(json.loads(out))
+    except json.JSONDecodeError:
+        return state(UNKNOWN, [], f"{HUB} json printed unparseable output")
+
+
+def render(st):
+    """Icon name and panel label — the only two things the panel shows."""
+    if st["level"] == UNKNOWN:
+        return ICONS[UNKNOWN], "?"
+    # "n+" when the count is known to be a floor: a partial answer saying so.
+    return ICONS[st["level"]], f"{st['count']}{'+' if st['note'] else ''}"
+
+
+def menu_lines(st):
+    """The only place detail can live: GNOME's appindicator implementation has
+    no tooltip support at all, so a closed menu is everything the panel says.
+    """
+    lines = [f"{GLYPHS[row['status']]}  {row['project']} — {row['title']}".rstrip(" —")
+             for row in st["rows"]]
+    if not lines and not st["note"]:
+        lines.append("Nothing needs attention.")  # herdr-hub list's wording
+    if st["note"]:
+        lines.append(st["note"])
+    return lines
+
+
+def menu_key(st):
+    """What the menu is made of — so a poll that changes nothing rebuilds nothing."""
+    return st["note"], tuple((r["project"], r["status"], r["title"]) for r in st["rows"])
+
+
+def run_indicator():
+    # Imported here, not at module scope, so `once` and `systemd` still work on
+    # a box with no display and no PyGObject — which is what makes the state
+    # machine above testable.
+    import threading
+
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("AyatanaAppIndicator3", "0.1")
+    from gi.repository import AyatanaAppIndicator3 as AppIndicator
+    from gi.repository import GLib, Gtk
+
+    def build_menu(st):
+        menu = Gtk.Menu()
+        for line in menu_lines(st):
+            item = Gtk.MenuItem.new_with_label(line)
+            item.set_sensitive(False)  # a read-out, not a control surface
+            child = item.get_child()
+            # new_with_label never turns markup on, but say it out loud: this
+            # text is agent-controlled, and a default flipping under us would
+            # turn a sandbox's window title into Pango.
+            if isinstance(child, Gtk.Label):
+                child.set_use_markup(False)
+            menu.append(item)
+        menu.append(Gtk.SeparatorMenuItem())
+        quit_item = Gtk.MenuItem.new_with_label("Quit")
+        quit_item.connect("activate", lambda _item: Gtk.main_quit())
+        menu.append(quit_item)
+        menu.show_all()  # without this every row is invisible
+        return menu
+
+    # Grey with an empty count, because before the first poll returns we have
+    # genuinely not asked anyone anything.
+    starting = state(UNKNOWN, [], "no answer from %s yet" % HUB)
+
+    indicator = AppIndicator.Indicator.new_with_path(
+        "herdr-tray", ICONS[UNKNOWN],
+        AppIndicator.IndicatorCategory.SYSTEM_SERVICES, ICON_DIR)
+    # The menu goes on before anything else can emit: libappindicator exports
+    # its icon and label changes against the menu server's object path, and
+    # signalling before that server exists trips a GLib-GIO-CRITICAL on stderr
+    # — which under systemd means a warning in the journal on every start.
+    indicator.set_menu(build_menu(starting))
+    indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+    # "88" reserves width so the panel stops twitching as the count changes.
+    indicator.set_label("?", "88")
+
+    # Both touched only from the main loop thread (tick, and apply via
+    # idle_add), so they need no lock even though they look like they do.
+    shown = {"menu_key": menu_key(starting), "busy": False}
+
+    def apply(st):
+        shown["busy"] = False
+        icon, label = render(st)
+        indicator.set_icon_full(icon, label)
+        indicator.set_label(label, "88")
+        indicator.set_title("; ".join(menu_lines(st)))
+        # Rebuilding every poll would yank an open menu out from under the
+        # pointer, so only rebuild when the content actually changed.
+        key = menu_key(st)
+        if key != shown["menu_key"]:
+            shown["menu_key"] = key
+            indicator.set_menu(build_menu(st))
+        return GLib.SOURCE_REMOVE  # idle_add re-runs a callback returning true
+
+    def work():
+        try:
+            st = poll()
+        except Exception as exc:  # a poller dying silently would freeze the panel
+            st = state(UNKNOWN, [], f"poll failed: {exc}")
+        GLib.idle_add(apply, st)  # the only thread-safe way back to the UI
+
+    def tick():
+        # Skip, do not queue. One poll can outlive its own interval when a
+        # sandbox is slow, and stacking them multiplies processes, not freshness.
+        if not shown["busy"]:
+            shown["busy"] = True
+            threading.Thread(target=work, daemon=True).start()
+        return GLib.SOURCE_CONTINUE
+
+    def quit_(*_args):
+        Gtk.main_quit()
+        return GLib.SOURCE_REMOVE
+
+    tick()  # paint something true now, not one interval from now
+    GLib.timeout_add_seconds(INTERVAL, tick)
+    # So `systemctl --user stop` and Ctrl-C both leave through Gtk's own exit.
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, quit_)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, quit_)
+    Gtk.main()
+
+
+# Printed rather than committed as a file, the same way `herdr-hub tmux` prints
+# its snippet: one install story, kept next to the thing it installs.
+SYSTEMD_UNIT = """\
+[Unit]
+Description=herdr-tray — panel dot for sandboxed agents needing attention
+# PartOf so logging out takes it down with the session rather than orphaning a
+# process drawing on a panel that no longer exists. After because the icon can
+# only register with the shell's StatusNotifierWatcher once the session is up,
+# and because DISPLAY/XAUTHORITY only reach the user manager through the
+# import-environment that gnome-session runs on the way to this target.
+PartOf=graphical-session.target
+After=graphical-session.target
+# Five failures in five minutes and systemd stops respawning: a broken install
+# should stay visibly broken rather than spin.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/herdr-tray
+# Spelled out because a user unit does not inherit a login shell's PATH. It
+# needs ~/.local/bin for herdr-hub and herdr, and /usr/bin for ruby (the hub's
+# shebang is `env ruby`) and timeout. Note what is deliberately absent: any
+# version-manager shim directory, which would rot the moment you change runtime.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# on-failure, not always: Quit from the menu is a clean exit and should stay
+# quit. `systemctl --user start herdr-tray` brings it back.
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target
+"""
+
+USAGE = """\
+Usage: herdr-tray [once|systemd]
+
+A GNOME panel dot counting the sandboxed agents (sandbox-agent + herdr) that
+are blocked or done. Run `herdr-tray systemd` for the user unit that starts it.
+"""
+
+
+def main(argv):
+    command = argv[0] if argv else None
+    if command is None:
+        run_indicator()
+    elif command == "once":
+        st = poll()
+        icon, label = render(st)
+        print(json.dumps({**st, "icon": icon, "label": label}))
+    elif command == "systemd":
+        print(SYSTEMD_UNIT, end="")
+    else:
+        sys.exit(USAGE)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

@@ -154,5 +154,43 @@ class HerdrHubTest(unittest.TestCase):
         self.assertFalse(entry.exists())
 
 
+    def test_json_reports_every_live_sandbox_with_its_agents(self) -> None:
+        self.add_sandbox("miriad", "miriad", "@2", "blocked", "idle")
+        entries = json.loads(self.run_hub("json"))
+        self.assertEqual(1, len(entries))
+        self.assertEqual("miriad", entries[0]["tmux_session"])
+        self.assertEqual("⚠ blocked", entries[0]["marker"])
+        self.assertEqual(["blocked", "idle"], [a["status"] for a in entries[0]["agents"]])
+
+    def test_json_keeps_an_unanswering_sandbox_that_the_others_drop(self) -> None:
+        # A live socket whose herdr never replies. status and list would rather
+        # say nothing than flap while a sandbox boots; json cannot afford that
+        # silence, because herdr-tray's quiet dot is a positive claim.
+        entry = self.add_sandbox("miriad", "miriad", "@2", "blocked")
+        Path(f"{self.tmp / 'miriad.sock'}.reply").unlink()  # cat fails -> nil agents
+        entries = json.loads(self.run_hub("json"))
+        self.assertEqual([None], [e["agents"] for e in entries])
+        self.assertIsNone(entries[0]["marker"])
+        self.assertTrue(entry.exists())  # kept: it may just be starting up
+        self.assertEqual("", self.run_hub("status").strip())
+        self.assertEqual("Nothing needs attention.", self.run_hub("list").strip())
+
+    def test_json_prunes_a_dead_socket_like_the_other_subcommands(self) -> None:
+        entry = self.state / "gone.json"
+        entry.write_text(
+            json.dumps(
+                {
+                    "project": "/tmp/gone",
+                    "tmux_session": "dead",
+                    "tmux_window_id": "@9",
+                    "herdr_socket": str(self.tmp / "missing.sock"),
+                    "pid": 1,
+                }
+            )
+        )
+        self.assertEqual([], json.loads(self.run_hub("json")))
+        self.assertFalse(entry.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
