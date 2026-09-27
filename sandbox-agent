@@ -374,7 +374,10 @@ end
 # socket_dir is agent-writable.
 if flags[:mux] == "herdr" && ENV["TMUX"]
   fmt = '#S|#{window_id}' # tmux format tokens, not Ruby interpolation
-  out, _err, tmux_status = Open3.capture3("tmux", "display-message", "-p", fmt)
+  # Without -t, display-message reports the session's current window, not the
+  # caller's: a launch in a background window would record the wrong one.
+  target = ENV["TMUX_PANE"] ? ["-t", ENV["TMUX_PANE"]] : []
+  out, _err, tmux_status = Open3.capture3("tmux", "display-message", "-p", *target, fmt)
   session, window_id = out.strip.split("|", 2) if tmux_status.success?
   unless session.to_s.empty?
     registry_dir = File.join(home, ".local", "state", "sandbox-agent")
