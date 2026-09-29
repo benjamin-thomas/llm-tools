@@ -26,6 +26,7 @@ Controls (active at any time, including during playback):
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import select
@@ -33,7 +34,9 @@ import subprocess
 import sys
 import tty
 import termios
+import urllib.error
 import urllib.parse
+import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, Literal, TypedDict, cast
 
@@ -410,49 +413,47 @@ def download_chunk(text: str) -> str:
         return path
 
     import time
-    import requests  # type: ignore[reportMissingModuleSource]
+    response_type = selected_voice['response_type']
+    if response_type not in ('raw', 'base64_json'):
+        sys.exit(f"ERROR: unknown response_type: {response_type}")
+
     api_key = os.environ.get(selected_voice['api_key_env'])
     if not api_key:
         sys.exit(f"ERROR: {selected_voice['api_key_env']} not set.")
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     tmp = path + '.tmp'
-    headers = {'Authorization': f'Bearer {api_key}'}
+    headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
     body = selected_voice['payload'](text)
     tts_input = body.get('input', text)
+    req = urllib.request.Request(selected_voice['url'], data=json.dumps(body).encode(), headers=headers)
 
     # Retry on 5xx / transient network errors (e.g. Mistral "Service unavailable")
     MAX_ATTEMPTS = 4
+    data = b''
     for attempt in range(MAX_ATTEMPTS):
         try:
-            if selected_voice['response_type'] == 'raw':
-                resp = requests.post(selected_voice['url'], headers=headers, json=body, stream=True, timeout=60)
-                if 500 <= resp.status_code < 600:
-                    raise requests.HTTPError(f"{resp.status_code}: {resp.text[:200]}", response=resp)
-                resp.raise_for_status()
-                with open(tmp, 'wb') as f:
-                    for c in resp.iter_content(chunk_size=4096):
-                        if c:
-                            f.write(c)
-            elif selected_voice['response_type'] == 'base64_json':
-                import base64
-                resp = requests.post(selected_voice['url'], headers=headers, json=body, timeout=60)
-                if 500 <= resp.status_code < 600:
-                    raise requests.HTTPError(f"{resp.status_code}: {resp.text[:200]}", response=resp)
-                resp.raise_for_status()
-                with open(tmp, 'wb') as f:
-                    f.write(base64.b64decode(resp.json()['audio_data']))
-            else:
-                sys.exit(f"ERROR: unknown response_type: {selected_voice['response_type']}")
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = resp.read()
             break
-        except (requests.HTTPError, requests.ConnectionError, requests.Timeout) as e:
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or attempt == MAX_ATTEMPTS - 1:
+                raise
+            err = f"{e.code}: {e.read()[:200].decode(errors='replace')}"
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
             if attempt == MAX_ATTEMPTS - 1:
                 raise
-            delay = 0.5 * (2 ** attempt)  # 0.5, 1.0, 2.0
-            preview = tts_input[:120] + ('...' if len(tts_input) > 120 else '')
-            print(f"\n\033[33m[retry {attempt+1}/{MAX_ATTEMPTS-1}] {e} — waiting {delay}s\n  text: {preview!r}\033[0m", file=sys.stderr)
-            time.sleep(delay)
+            err = str(e)
+        delay = 0.5 * (2 ** attempt)  # 0.5, 1.0, 2.0
+        preview = tts_input[:120] + ('...' if len(tts_input) > 120 else '')
+        print(f"\n\033[33m[retry {attempt+1}/{MAX_ATTEMPTS-1}] {err} — waiting {delay}s\n  text: {preview!r}\033[0m", file=sys.stderr)
+        time.sleep(delay)
 
+    if response_type == 'base64_json':
+        import base64
+        data = base64.b64decode(json.loads(data)['audio_data'])
+    with open(tmp, 'wb') as f:
+        f.write(data)
     os.rename(tmp, path)
     return path
 
