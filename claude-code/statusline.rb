@@ -201,6 +201,7 @@ def token_totals(path, since = nil)
   output = 0
   cached = 0
   since_miss = 0
+  last_at = nil
 
   File.foreach(path) do |line|
     next unless line.include?('"usage"')
@@ -218,6 +219,7 @@ def token_totals(path, since = nil)
     input += usage["input_tokens"].to_i + usage["cache_creation_input_tokens"].to_i + read
     output += usage["output_tokens"].to_i
     cached += read
+    last_at = obj["timestamp"] || last_at
 
     # Turns since the last rebuild: Claude Code counts misses, not the clean
     # run after one.
@@ -226,7 +228,8 @@ def token_totals(path, since = nil)
     end
   end
 
-  { input: input, output: output, cached: cached, since_miss: since_miss }
+  { input: input, output: output, cached: cached, since_miss: since_miss,
+    last_at: last_at && (Time.parse(last_at).to_i rescue nil) }
 end
 
 # --- The prompt cache, as Claude Code itself measures it ---------------------
@@ -301,4 +304,32 @@ begin
   puts second.join("#{DIM} · #{RESET}") unless second.empty?
 rescue StandardError
   # never let the stats line break the status line
+end
+
+# --- Rate limits for pfm4's manage/agents budget -----------------------------
+#
+# The windows from line 1, so it need not ask the rate-limited usage endpoint.
+# They are only as fresh as this session's last API response -- a repaint
+# changes nothing -- so stamp that, and never let an idle session's older
+# numbers overwrite a busier session's newer ones.
+
+RATE_LIMITS_CACHE = File.join(
+  ENV["XDG_CACHE_HOME"] || File.join(Dir.home, ".cache"),
+  "claude-statusline", "rate-limits.json"
+)
+
+begin
+  seen_at = totals && totals[:last_at]
+  previous = (JSON.parse(File.read(RATE_LIMITS_CACHE))["fetched_at"].to_i rescue 0)
+
+  if rate_limits && seen_at && seen_at > previous
+    FileUtils.mkdir_p(File.dirname(RATE_LIMITS_CACHE))
+    tmp = "#{RATE_LIMITS_CACHE}.#{Process.pid}"
+    File.write(tmp, JSON.generate("fetched_at" => seen_at,
+                                  "five_hour" => rate_limits.fetch("five_hour"),
+                                  "seven_day" => rate_limits.fetch("seven_day")))
+    File.rename(tmp, RATE_LIMITS_CACHE) # atomic, like the model windows
+  end
+rescue StandardError
+  # a missing transcript or an unwritable cache only costs manage/agents a fetch
 end
