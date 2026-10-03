@@ -22,14 +22,28 @@
 #   XDG_CURRENT_DESKTOP / XDG_SESSION_TYPE / DESKTOP_SESSION: their only job
 #   was helping Electron apps find an OS keyring, i.e. the thing above.
 #
+#   The host X server: /tmp/.X11-unix, the cookie, DISPLAY. Any X client can
+#   read every keystroke, capture the screen, and type into a host terminal
+#   (XTEST) — an escape as complete as an ssh socket. Hiding the socket is not
+#   enough, either: Xorg also listens on an abstract socket that the shared
+#   network namespace leaves reachable, so the sandbox is kept out by the
+#   cookie it lacks, and the GNOME `xhost +SI:localuser` rule that would waive
+#   the cookie is revoked at every launch. See sandbox-x11.rb.
+#
+#   What replaces it: a private Xephyr screen per session (Chrome shows up
+#   there, and nothing in it can reach the host's windows), and a bridge for
+#   the CLIPBOARD selection only — text and images, both ways.
+#
 # .sandbox-mounts cannot quietly re-add them: that file lives in the project the
 # agent can write, so it authorizes nothing by itself — it requests, and you
 # approve with `sandbox-agent allow`. See the "Mount approval" comment in
 # sandbox-lib.rb for why this is an approval step and not a denylist.
 #
-# Still granted, for the record: X11 (clipboard — note any X client can read
-# other windows' keystrokes), ~/.password-store + ~/.gnupg ro (commit signing),
-# ~/.cache rw, ~/.local ro, audio devices, the project dir rw.
+# Still granted, for the record: the CLIPBOARD selection through the bridge
+# (an agent can read whatever you copy there, at any time — set
+# PASSWORD_STORE_X_SELECTION=primary to keep `pass -c` out of it), ~/.password-store
+# + ~/.gnupg ro (commit signing), ~/.cache rw, ~/.local ro, audio devices, the
+# project dir rw.
 
 require "fileutils"
 require "json"
@@ -47,7 +61,7 @@ require_relative "sandbox-lib"
 # multiplexer block below can keep calling ro/rw unqualified.
 include SandboxLib
 
-flags = { git_rw: nil, mux: "herdr", write: false, mounts: [], setenv: [] }
+flags = { git_rw: nil, mux: "herdr", gui: true, write: false, mounts: [], setenv: [] }
 
 # `doctor` is a subcommand, not a flag: it takes a project dir and no command.
 if (allow = ARGV.first == "allow")
@@ -81,6 +95,8 @@ parser = OptionParser.new do |opts|
     flags[:mux] = mux
     flags[:mux_explicit] = true
   end
+  opts.on("--[no-]gui", "Private Xephyr screen for GUI apps, e.g. Chrome (default: on).",
+          "Turn it off for sessions that never open a window") { |gui| flags[:gui] = gui }
   opts.on("--write", "doctor only: append the missing declarations it found") { flags[:write] = true }
   # --mount/--setenv come from the command line, not from .sandbox-mounts, so
   # they are the operator speaking rather than the project. That is the whole
@@ -111,6 +127,15 @@ parser = OptionParser.new do |opts|
   opts.separator "  SSH — no keys, no agent socket, no ssh/scp/sftp binaries"
   opts.separator "  Session D-Bus + gnome-keyring — the KWallet/Secret Service password API"
   opts.separator "  The host multiplexer server — see the --mux note below"
+  opts.separator "  The host X server — no access to your windows, keystrokes or screen"
+  opts.separator ""
+  opts.separator "GUI apps get a private screen instead: one Xephyr window per session,"
+  opts.separator "titled after the project, that Chrome and its windows follow on resize."
+  opts.separator "It starts minimized on the last workspace; bring it back from the dock."
+  opts.separator "The CLIPBOARD selection (not PRIMARY) is bridged both ways, text and"
+  opts.separator "images: `xclip -selection clipboard` inside talks to your desktop's, so"
+  opts.separator "Ctrl+V of a screenshot works in Claude Code, and the Xephyr window's"
+  opts.separator "clipboard is synced as focus enters and leaves it."
   opts.separator ""
   opts.separator "The agent always runs inside a sandboxed multiplexer server so sub-agent"
   opts.separator "panes stay confined. Ctrl-o is the prefix either way (with tmux,"
@@ -245,10 +270,11 @@ home = ENV.fetch("HOME")
 args = SandboxLib.build_base_args(
   project_dir,
   git_rw: flags[:git_rw],
-  headless: false,          # interactive: keep X11 for the clipboard, and audio
+  headless: false,          # interactive: someone is watching, no /sys needed
   command: cmd.first,
   extra_mounts: flags[:mounts],
-  extra_env: flags[:setenv]
+  extra_env: flags[:setenv],
+  path_prepend: [SandboxLib::SHIM_DIR]
 )
 
 # --- sandboxed multiplexer server ---
@@ -362,6 +388,29 @@ if mux_socket
   warn "Sandbox #{flags[:mux]} socket: #{mux_socket}"
   warn "Attach from another terminal:  #{attach_hint}"
   warn "---"
+end
+
+# --- clipboard bridge and private screen ---
+#
+# Both run here on the host, in this process, for as long as the sandbox does:
+# they are what replaces the host X server, which the sandbox never sees (see
+# the header). The bridge socket and the Xephyr cookie live in socket_dir, and
+# only the Xephyr socket itself is bound in.
+
+clipboard_socket = File.join(socket_dir, "clipboard.sock")
+SandboxX11.serve_clipboard(clipboard_socket)
+args.push("--setenv", "SANDBOX_CLIPBOARD_SOCKET", clipboard_socket)
+
+if flags[:gui]
+  title = "sandbox: #{File.basename(File.dirname(project_dir))}/#{File.basename(project_dir)}"
+  screen = SandboxX11.start_screen(socket_dir, title)
+  if screen
+    at_exit { SandboxX11.stop_screen(screen) }
+    args.push(*ro("/tmp/.X11-unix/X#{screen.display.delete(":")}"),
+              "--setenv", "DISPLAY", screen.display,
+              "--setenv", "XAUTHORITY", screen.auth)
+    SandboxX11.watch_screen(screen)
+  end
 end
 
 # --- host-side registry for herdr-hub ---

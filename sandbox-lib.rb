@@ -8,16 +8,22 @@
 # one .sandbox-mounts contract. Two copies would drift, and a drifted mount rule
 # is exactly how the auto-mounted-symlink hole got in.
 #
-# What stays in the callers: X11/audio and the multiplexer (interactive only),
-# Orca's userData, port and pairing (server only).
+# What stays in the callers: the private screen, the clipboard bridge and the
+# multiplexer (interactive only), Orca's userData, port and pairing (server
+# only). X11 itself lives in sandbox-x11.rb.
 
 require "digest"
 require "fileutils"
 require "open3"
 require "shellwords"
 
+require_relative "sandbox-x11"
+
 module SandboxLib
   module_function
+
+  # Stand-ins put first on the sandbox PATH (the bridged xclip).
+  SHIM_DIR = File.join(__dir__, "sandbox-shims")
 
   def detect_opam_switch
     config = File.expand_path("~/.opam/config")
@@ -422,16 +428,21 @@ module SandboxLib
   # Every bwrap argument the two tools share, in the order bwrap needs — last
   # mount wins, so the ordering here is load-bearing, not stylistic.
   #
-  # headless      no host X11: drops the display grant and lets a sandbox-local
-  #               Xvfb create its own socket, which the read-only host mount of
-  #               /tmp/.X11-unix would otherwise prevent.
+  # headless      a server with no one watching: mounts /sys for Chromium. The
+  #               host display is out of reach either way (see sandbox-x11.rb).
   # extra_mounts  operator-supplied "MODE:SRC[:DEST]" strings. Applied after the
   #               project's own .sandbox-mounts so they win a conflict, and
   #               before the floor masks so they cannot defeat them.
   # command  the executable that will run inside, when the caller knows it. Only
   #          used to resolve a symlinked launcher's target (a CLI whose binary
   #          lives beside the state it writes), so nil is fine.
-  def build_base_args(project_dir, git_rw:, headless:, command: nil, extra_mounts: [], extra_env: [])
+  # path_prepend  dirs put first on the sandbox PATH, ahead of ~/.local/bin.
+  def build_base_args(project_dir, git_rw:, headless:, command: nil, extra_mounts: [], extra_env: [],
+                      path_prepend: [])
+    # Before anything else: no sandbox may start while the host X server would
+    # admit it.
+    SandboxX11.close_host_display!
+
     # --- detect paths ---
 
     home = ENV.fetch("HOME")
@@ -477,20 +488,10 @@ module SandboxLib
     chrome_dir = detect_chrome_install_dir
     args.push(*ro(chrome_dir)) if chrome_dir
 
-    # X11 clipboard access.
-    #
-    # Skipped under --headless, and not only to drop the grant: the host mount is
-    # read-only, so a sandbox-local Xvfb cannot create its own socket underneath it
-    # and dies with "Xvfb did not become ready". Leaving the dir out entirely lets
-    # the tmpfs /tmp supply a writable one.
-    x11_socket = "/tmp/.X11-unix"
-    xauthority = nil
-    unless headless
-      args.push(*ro(x11_socket)) if File.directory?(x11_socket)
-      xauthority = ENV["XAUTHORITY"]&.then { |path| File.expand_path(path) }
-      xauthority = nil unless xauthority && File.file?(xauthority)
-      args.push(*ro(xauthority)) if xauthority
-    end
+    # No host X11: neither /tmp/.X11-unix nor the cookie comes through, in any
+    # mode. An X client can read keystrokes and type into host terminals; see
+    # sandbox-x11.rb, and the private screen sandbox-agent provides instead. The
+    # tmpfs /tmp leaves a sandbox-local Xvfb free to create its own socket.
 
     # Chromium reads /sys/devices/system/cpu to size its worker pools. Harmless to
     # expose (read-only kernel metadata, no secrets) and Electron logs errors on
@@ -709,14 +710,14 @@ module SandboxLib
 
     # Some host tools are symlinks back into the llm-tools repo, and they must still
     # resolve inside the sandbox: ~/.claude/statusline.rb, which Claude Code runs
-    # there, and the herdr-hub / herdr-tray / sandbox-agent entries in ~/.local/bin.
-    # Mount the repo root ro for them. Skipped when the sandboxed project already
-    # covers the repo (it is the repo, or a parent/child of it) to avoid a
-    # conflicting double bind.
-    llm_tools_root = "#{home}/code/github.com/benjamin-thomas/llm-tools"
+    # there, the herdr-hub / herdr-tray / sandbox-agent entries in ~/.local/bin,
+    # and SHIM_DIR, first on the sandbox PATH. Mount the repo root ro for them.
+    # Skipped when the project already covers the repo (it is the repo, or a
+    # parent of it): the ro bind would land after the project's rw one and win.
+    # A project inside the repo is fine — its rw bind comes later and wins.
+    llm_tools_root = __dir__
     llm_tools_covered =
       project_dir == llm_tools_root ||
-      project_dir.start_with?("#{llm_tools_root}/") ||
       llm_tools_root.start_with?("#{project_dir}/")
     args.push(*ro(llm_tools_root)) if File.directory?(llm_tools_root) && !llm_tools_covered
 
@@ -827,6 +828,7 @@ module SandboxLib
     lang      = ENV.fetch("LANG", "en_US.UTF-8")
 
     path_dirs = [
+      *path_prepend,
       "#{home}/.local/bin",
       *extra_path_dirs,
       *(nvm_bin ? [nvm_bin] : []),
@@ -849,8 +851,6 @@ module SandboxLib
               "--setenv", "LANG", lang,
               *(ENV["EDITOR"] ? ["--setenv", "EDITOR", ENV["EDITOR"]] : []),
               *(!git_rw ? ["--setenv", "GIT_OPTIONAL_LOCKS", "0"] : []),
-              *(ENV["DISPLAY"] && !headless ? ["--setenv", "DISPLAY", ENV["DISPLAY"]] : []),
-              *(xauthority ? ["--setenv", "XAUTHORITY", xauthority] : []),
               *(ENV["DISABLE_AUTO_COMPACT"] ? ["--setenv", "DISABLE_AUTO_COMPACT", "1"] : []),
               *(ENV["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] ? ["--setenv", "CLAUDE_CODE_DISABLE_AUTO_MEMORY", ENV["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]] : []),
               *(ENV["XDG_RUNTIME_DIR"] ? ["--setenv", "XDG_RUNTIME_DIR", ENV["XDG_RUNTIME_DIR"]] : []),
