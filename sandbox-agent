@@ -452,6 +452,8 @@ end
 # are its doors, served from here like the clipboard bridge. See sandbox-network.rb.
 
 net_log = SandboxNetwork.log_path(project_dir)
+mounts_file = SandboxLib.mounts_file(project_dir)
+launch_mounts = File.exist?(mounts_file) ? File.read(mounts_file) : "" # approved: checked above
 # The one piece of ~/.sandbox-agent a sandbox sees: its own log, read-only, so
 # an agent can read why it was refused (and never another project's log).
 FileUtils.mkdir_p(File.dirname(net_log))
@@ -460,9 +462,13 @@ args.push(*ro(net_log))
 net = SandboxNetwork.start(socket_dir,
                        to_host: net_endpoints["host"].uniq,
                        expose: net_endpoints["expose"].uniq,
-                       # The approved copy, never the project's file: an agent
-                       # can edit that one. Re-read at every request.
-                       allow: -> { SandboxNetwork.allowlist(SandboxLib.approved_content(project_dir)) },
+                       # Re-read at every request, but only ever an approved
+                       # text: the file as it is now if `allow` has seen it (an
+                       # agent can edit it), else as it was approved at launch.
+                       allow: lambda {
+                         current = File.exist?(mounts_file) && SandboxLib.mounts_approved?(project_dir) ? File.read(mounts_file) : nil
+                         SandboxNetwork.allowlist(current || launch_mounts)
+                       },
                        log: SandboxNetwork.logger(net_log))
 net_info = File.join(socket_dir, "NETWORK.txt")
 File.write(net_info, SandboxNetwork.info_text(

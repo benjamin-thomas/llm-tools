@@ -356,14 +356,23 @@ module SandboxLib
   # would be redundant. A dangerous line is visible at approval time, which is
   # the one place a human actually looks.
   #
-  # The store, outside every sandbox's reach (read-only at most, see Invariants):
+  # The store, outside every sandbox's reach (see Invariants): one folder per
+  # project, named after its path like ~/.claude/projects, holding every version
+  # of its .sandbox-mounts you approved, each under its sha256.
   #
   #   ~/.sandbox-agent/approvals/
-  #     by-content/<sha256>            each .sandbox-mounts text you approved
-  #     by-project/<project>-<hash>    the sha256 last approved for that project
+  #     home-me-code-github.com-org-app/
+  #       3f2a…   (an approved version; the last APPROVALS_KEPT are kept)
+  #       9c1d…   (the latest is the newest file)
   APPROVAL_DIR = File.expand_path("~/.sandbox-agent/approvals")
 
-  def approved_copy(digest) = File.join(APPROVAL_DIR, "by-content", digest)
+  # Versions kept per project: room to switch back and forth between recent
+  # files without asking again; older ones are deleted at the next approval.
+  APPROVALS_KEPT = 10
+
+  def project_approvals(project_dir, store: APPROVAL_DIR)
+    File.join(store, project_dir.delete_prefix("/").tr("/", "-"))
+  end
 
   def mounts_file(project_dir) = File.join(project_dir, ".sandbox-mounts")
 
@@ -373,48 +382,39 @@ module SandboxLib
     File.exist?(file) ? Digest::SHA256.hexdigest(File.read(file)) : nil
   end
 
-  def mounts_approved?(project_dir)
+  # Approved if this exact text was approved for any project: a new worktree
+  # with the same file needs no second look.
+  def mounts_approved?(project_dir, store: APPROVAL_DIR)
     digest = mounts_digest(project_dir)
-    digest.nil? || File.exist?(approved_copy(digest))
+    digest.nil? || !Dir.glob(File.join(store, "*", digest)).empty?
   end
 
-  # Where the last approved content for THIS project is remembered. The store is
-  # keyed by content hash, which cannot answer "what did it look like before?" —
-  # so a per-project pointer records which hash was last approved, and that is
-  # what the diff below compares against.
-  def approval_pointer(project_dir)
-    name = "#{File.basename(project_dir)}-#{Digest::SHA256.hexdigest(project_dir)[0, 16]}"
-    File.join(APPROVAL_DIR, "by-project", name)
-  end
-
-  def approved_content(project_dir)
-    pointer = approval_pointer(project_dir)
-    return nil unless File.exist?(pointer)
-
-    previous = approved_copy(File.read(pointer).strip)
-    File.exist?(previous) ? File.read(previous) : nil
+  # The newest version approved for THIS project: what the diff compares with.
+  def approved_content(project_dir, store: APPROVAL_DIR)
+    latest = Dir.glob(File.join(project_approvals(project_dir, store: store), "*")).max_by { |f| File.mtime(f) }
+    latest && File.read(latest)
   end
 
   # Shows what changed since this project's last approval, in color, and
   # approves only on an explicit yes: the diff is the one place a human reads
   # what an agent may have slipped into the file.
-  def approve_mounts!(project_dir, input: $stdin)
+  def approve_mounts!(project_dir, input: $stdin, store: APPROVAL_DIR)
     digest = mounts_digest(project_dir)
     if digest.nil?
       warn "#{project_dir} declares no mounts — nothing to approve."
       return 0
     end
-    pointer = approval_pointer(project_dir)
-    if File.exist?(pointer) && File.read(pointer).strip == digest
+    current = File.read(mounts_file(project_dir))
+    previous = approved_content(project_dir, store: store)
+    if previous == current
       puts "#{mounts_file(project_dir)} is already approved, unchanged."
       return 0
     end
 
-    previous = approved_content(project_dir)
     puts(previous ? "#{mounts_file(project_dir)} changed since you approved it (- removed, + added):"
                   : "#{mounts_file(project_dir)} has never been approved. It requests:")
     puts
-    approval_diff(previous, File.read(mounts_file(project_dir)), color: $stdout.tty?).each { |l| puts "  #{l}" }
+    approval_diff(previous, current, color: $stdout.tty?).each { |l| puts "  #{l}" }
     puts
     print "Approve? [y/N] "
     unless %w[y yes].include?(input.gets.to_s.strip.downcase)
@@ -422,11 +422,14 @@ module SandboxLib
       return 1
     end
 
-    FileUtils.mkdir_p([File.join(APPROVAL_DIR, "by-content"), File.join(APPROVAL_DIR, "by-project")])
-    FileUtils.chmod(0o700, APPROVAL_DIR) rescue nil
+    folder = project_approvals(project_dir, store: store)
+    FileUtils.mkdir_p(folder)
+    FileUtils.chmod(0o700, store) rescue nil
     # The content, not an empty marker: it is what a later diff compares against.
-    File.write(approved_copy(digest), File.read(mounts_file(project_dir)))
-    File.write(approval_pointer(project_dir), digest)
+    # Written even when an older approval holds the same text, so it becomes
+    # the newest file again.
+    File.write(File.join(folder, digest), current)
+    Dir.glob(File.join(folder, "*")).sort_by { |f| File.mtime(f) }.reverse.drop(APPROVALS_KEPT).each { |f| File.delete(f) }
     puts "Approved. Any edit to the file will ask again."
     puts "internet: lines apply now, running sessions included; everything else at the next launch."
     0
