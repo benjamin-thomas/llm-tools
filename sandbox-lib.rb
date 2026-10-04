@@ -477,6 +477,17 @@ module SandboxLib
     ]
   end
 
+  # sandbox-agent's own state. Readable is fine (~/.local comes through ro),
+  # writable is not: whoever writes the approval store approves their own
+  # mounts and hosts, and the config holds the network allowlist.
+  def own_state_paths(home)
+    [
+      "#{home}/.local/share/sandbox-agent", # approvals
+      "#{home}/.local/state/sandbox-agent", # network logs, herdr-hub registry
+      "#{home}/.config/sandbox-agent",      # net-allow
+    ]
+  end
+
   FORBIDDEN_ENV = %w[SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS GPG_AGENT_INFO].freeze
 
   BIND_FLAGS = %w[--bind --ro-bind --dev-bind --bind-try --ro-bind-try --dev-bind-try].freeze
@@ -502,6 +513,15 @@ module SandboxLib
       real = begin File.realpath(src) rescue src end
       forbidden.each do |f|
         violations << "#{arg} #{src} exposes #{f}" if exposes?(src, f) || exposes?(real, f)
+      end
+    end
+
+    args.each_with_index do |arg, i|
+      next unless %w[--bind --dev-bind --bind-try --dev-bind-try].include?(arg)
+
+      src = args[i + 1]
+      own_state_paths(home).each do |own|
+        violations << "#{arg} #{src} makes #{own} writable" if exposes?(src, own)
       end
     end
 

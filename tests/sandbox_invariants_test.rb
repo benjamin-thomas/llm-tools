@@ -111,6 +111,26 @@ class SandboxInvariantsTest < Minitest::Test
     refute_empty violations(["--clearenv"])
   end
 
+  # sandbox-agent's own state: whoever writes it approves mounts and hosts.
+  def test_approval_store_is_never_writable
+    refute_empty violations(base + rw("#{@home}/.local/share"))
+    refute_empty violations(base + rw("#{@home}/.local/share/sandbox-agent"))
+  end
+
+  def test_own_config_and_logs_are_never_writable
+    refute_empty violations(base + rw("#{@home}/.config"))
+    refute_empty violations(base + rw("#{@home}/.local/state/sandbox-agent/net"))
+  end
+
+  # Reading them is fine: ~/.local comes through read-only on every launch.
+  def test_own_state_may_be_read
+    assert_empty violations(base + ro("#{@home}/.local"))
+  end
+
+  def test_a_sibling_of_the_approval_store_may_be_writable
+    assert_empty violations(base + rw("#{@home}/.local/share/ruby-advisory-db"))
+  end
+
   def test_violation_names_the_path
     assert_match(/\.gnupg/, violations(base + ro("#{@home}/.gnupg")).join("\n"))
   end
