@@ -1,6 +1,9 @@
-#!/usr/bin/env ruby
+#!/usr/bin/ruby
 
 # Symlink to your ~/.local/bin/ directory
+#
+# The system ruby, not `env ruby`: a version manager's ruby (rbenv and the like)
+# may live in a directory a sandbox can write, and this script runs on the host.
 
 # --- Deliberately NOT granted — do not re-add ---
 #
