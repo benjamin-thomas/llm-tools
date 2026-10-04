@@ -386,17 +386,33 @@ module SandboxLib
     File.exist?(previous) ? File.read(previous) : nil
   end
 
-  def approve_mounts!(project_dir)
+  # Shows what changed since this project's last approval, in color, and
+  # approves only on an explicit yes: the diff is the one place a human reads
+  # what an agent may have slipped into the file.
+  def approve_mounts!(project_dir, input: $stdin)
     digest = mounts_digest(project_dir)
     if digest.nil?
       warn "#{project_dir} declares no mounts — nothing to approve."
       return 0
     end
+    pointer = approval_pointer(project_dir)
+    if File.exist?(pointer) && File.read(pointer).strip == digest
+      puts "#{mounts_file(project_dir)} is already approved, unchanged."
+      return 0
+    end
 
-    puts "Mounts requested by #{mounts_file(project_dir)}:"
+    previous = approved_content(project_dir)
+    puts(previous ? "#{mounts_file(project_dir)} changed since you approved it (- removed, + added):"
+                  : "#{mounts_file(project_dir)} has never been approved. It requests:")
     puts
-    parse_sandbox_mounts(project_dir, ENV.fetch("HOME")).each { |m| puts "  #{m[:mode]}:#{m[:path]}" }
+    approval_diff(previous, File.read(mounts_file(project_dir)), color: $stdout.tty?).each { |l| puts "  #{l}" }
     puts
+    print "Approve? [y/N] "
+    unless %w[y yes].include?(input.gets.to_s.strip.downcase)
+      puts "Not approved."
+      return 1
+    end
+
     FileUtils.mkdir_p(File.join(APPROVAL_DIR, "by-project"))
     FileUtils.chmod(0o700, APPROVAL_DIR) rescue nil
     # The content, not an empty marker: it is what a later diff compares against.
@@ -420,6 +436,25 @@ module SandboxLib
     lines.empty? ? ["(only blank lines or reordering changed)"] : lines
   end
 
+  # diff_mount_lines against the last approval, or every line on a first one;
+  # removals red and additions green when a terminal is watching.
+  def approval_diff(previous, current, color:)
+    lines =
+      if previous
+        diff_mount_lines(previous, current)
+      else
+        current.lines.map(&:chomp).reject { |l| l.strip.empty? }.map { |l| "+ #{l}" }
+      end
+    return lines unless color
+
+    lines.map do |l|
+      if l.start_with?("- ") then "\e[31m#{l}\e[0m"
+      elsif l.start_with?("+ ") then "\e[32m#{l}\e[0m"
+      else l
+      end
+    end
+  end
+
   def require_mounts_approval!(project_dir, tool)
     return if mounts_approved?(project_dir)
 
@@ -431,7 +466,7 @@ module SandboxLib
       warn ""
       warn "What changed (- was approved, + is new):"
       warn ""
-      diff_mount_lines(previous, current).each { |line| warn "  #{line}" }
+      approval_diff(previous, current, color: $stderr.tty?).each { |line| warn "  #{line}" }
     else
       warn "#{mounts_file(project_dir)} has never been approved."
       warn ""
