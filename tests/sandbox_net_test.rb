@@ -75,8 +75,8 @@ end
 class VerdictTest < Minitest::Test
   def list(text) = SandboxNet::HostList.parse(text)
 
-  def verdict(host, port, addrs, connect: [], allow: "github.com")
-    SandboxNet.verdict(host, port, addrs, connect, list(allow))
+  def verdict(host, port, addrs, to_host: [], allow: "github.com")
+    SandboxNet.verdict(host, port, addrs, to_host, list(allow))
   end
 
   def test_allowlisted_host_is_allowed
@@ -91,7 +91,7 @@ class VerdictTest < Minitest::Test
   def test_unlisted_host_is_denied_and_told_how_to_ask
     action, reason = verdict("example.org", 443, ["93.184.215.14"])
     assert_equal :deny, action
-    assert_match(/net:example\.org/, reason)
+    assert_match(/internet:example\.org/, reason)
     assert_match(/sandbox-agent allow/, reason)
   end
 
@@ -104,7 +104,7 @@ class VerdictTest < Minitest::Test
   def test_host_loopback_is_denied
     action, reason = verdict("127.0.0.1", 5433, ["127.0.0.1"])
     assert_equal :deny, action
-    assert_match(/connect:/, reason)
+    assert_match(/host:/, reason)
   end
 
   def test_name_resolving_to_loopback_is_denied
@@ -118,18 +118,18 @@ class VerdictTest < Minitest::Test
   end
 
   def test_declared_target_is_allowed
-    assert_equal :allow, verdict("127.1.0.2", 5432, ["127.1.0.2"], connect: [["127.1.0.2", 5432]]).first
+    assert_equal :allow, verdict("127.1.0.2", 5432, ["127.1.0.2"], to_host: [["127.1.0.2", 5432]]).first
   end
 
   def test_declared_address_on_another_port_is_denied
-    assert_equal :deny, verdict("127.1.0.2", 22, ["127.1.0.2"], connect: [["127.1.0.2", 5432]]).first
+    assert_equal :deny, verdict("127.1.0.2", 22, ["127.1.0.2"], to_host: [["127.1.0.2", 5432]]).first
   end
 end
 
 class NetHostsTest < Minitest::Test
-  def test_reads_net_lines_from_mounts_text
-    text = "ro:~/x\nnet:guides.rubyonrails.org\n  net: *.example.org  # docs\nconnect:127.1.0.2:5432\n# net:commented.org\n"
-    assert_equal ["guides.rubyonrails.org", "*.example.org"], SandboxNet.net_hosts(text)
+  def test_reads_internet_lines_from_mounts_text
+    text = "ro:~/x\ninternet:guides.rubyonrails.org\n  internet: *.example.org  # docs\nhost:127.1.0.2:5432\n# internet:commented.org\n"
+    assert_equal ["guides.rubyonrails.org", "*.example.org"], SandboxNet.internet_hosts(text)
   end
 end
 
@@ -185,8 +185,8 @@ class PrivateNetworkTest < Minitest::Test
   end
 
   # Runs `script` with ruby inside a sandbox wired by SandboxNet.start.
-  def in_sandbox(script, connect: [], publish: [])
-    net = SandboxNet.start(@dir, connect: connect, publish: publish,
+  def in_sandbox(script, to_host: [], expose: [])
+    net = SandboxNet.start(@dir, to_host: to_host, expose: expose,
                                  allow: -> { SandboxNet::HostList.parse("") },
                                  log: ->(*e) { @log << e })
     args = ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
@@ -202,7 +202,7 @@ class PrivateNetworkTest < Minitest::Test
 
   def test_declared_host_service_is_reachable
     port = echo_server
-    out, status = in_sandbox(<<~RUBY, connect: [["127.0.0.1", port]])
+    out, status = in_sandbox(<<~RUBY, to_host: [["127.0.0.1", port]])
       s = TCPSocket.new("127.0.0.1", #{port}); s.puts "hello"; print s.gets
     RUBY
     assert status.success?, out
@@ -221,7 +221,7 @@ class PrivateNetworkTest < Minitest::Test
   end
 
   def test_node_is_told_to_use_the_proxy
-    net = SandboxNet.start(@dir, connect: [], publish: [],
+    net = SandboxNet.start(@dir, to_host: [], expose: [],
                                  allow: -> { SandboxNet::HostList.parse("") }, log: ->(*) {})
     assert_equal "1", net.env["NODE_USE_ENV_PROXY"]
   ensure
@@ -247,7 +247,7 @@ class PrivateNetworkTest < Minitest::Test
       sleep 0.05 until File.exist?(ready)
       TCPSocket.open("127.0.0.1", port) { |s| s.puts "ping"; reply = s.gets }
     end
-    out, status = in_sandbox(<<~RUBY, publish: [["127.0.0.1", port]])
+    out, status = in_sandbox(<<~RUBY, expose: [["127.0.0.1", port]])
       server = TCPServer.new("127.0.0.1", #{port})
       File.write(#{ready.inspect}, "")
       c = server.accept; c.puts c.gets.to_s.upcase; c.close

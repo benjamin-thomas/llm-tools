@@ -5,10 +5,15 @@
 #   ro:/path          — read-only mount
 #   rw:/path          — read-write mount
 #   path:/path/bin    — add to PATH
-#   connect:IP:PORT   — a host service the sandbox may reach (its network is
-#                       private), e.g. connect:127.1.0.2:5432; IP/PREFIX for a
+#
+# Network (the sandbox's network is private; these are its only doors):
+#   internet:HOST     — sandbox -> internet: a site it may reach (HTTP/HTTPS,
+#                       via a proxy); a name covers its subdomains
+#   host:IP:PORT      — sandbox -> host: a service on this machine it may
+#                       connect to, e.g. host:127.1.0.2:5432; IP/PREFIX for a
 #                       range, PORT,PORT for several ports
-#   publish:IP:PORT   — a server inside the sandbox that the host must reach
+#   expose:IP:PORT    — host -> sandbox: a server it runs that the host (your
+#                       browser) must reach, e.g. expose:127.1.0.1:3000
 #
 # Paths starting with ~ are expanded to $HOME.
 # Lines starting with # are comments. Blank lines are ignored.

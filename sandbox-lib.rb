@@ -183,7 +183,7 @@ module SandboxLib
     bind_git_metadata!(args, path, writable: git_writable)
   end
 
-  NET_MODES = %w[connect publish net].freeze
+  NET_MODES = %w[internet host expose].freeze
 
   # Parse .sandbox-mounts into [{mode:, path:, target:, line:}].
   #
@@ -208,7 +208,7 @@ module SandboxLib
         next
       end
 
-      # connect:/publish:/net: name network endpoints, not paths (sandbox-net.rb).
+      # internet:/host:/expose: name network endpoints, not paths (sandbox-net.rb).
       if NET_MODES.include?(mode)
         next({ mode: mode, path: path.strip, target: path.strip, line: line })
       end
@@ -419,7 +419,7 @@ module SandboxLib
     File.write(File.join(APPROVAL_DIR, digest), File.read(mounts_file(project_dir)))
     File.write(approval_pointer(project_dir), digest)
     puts "Approved. Any edit to the file will ask again."
-    puts "net: lines apply now, running sessions included; everything else at the next launch."
+    puts "internet: lines apply now, running sessions included; everything else at the next launch."
     0
   end
 
@@ -519,7 +519,7 @@ module SandboxLib
     [
       "#{home}/.local/share/sandbox-agent", # approvals
       "#{home}/.local/state/sandbox-agent", # network logs, herdr-hub registry
-      "#{home}/.config/sandbox-agent",      # net-allow
+      "#{home}/.config/sandbox-agent",      # the internet allowlist
     ]
   end
 

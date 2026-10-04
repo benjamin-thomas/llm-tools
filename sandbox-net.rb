@@ -13,14 +13,14 @@
 #   proxy     HTTP(S) proxy, seen inside as 127.0.0.1:3128 through HTTP(S)_PROXY.
 #             Runs here, on the host, so it decides with the host's DNS and
 #             logs every request. Lets through only allowlisted hosts: the
-#             global ~/.config/sandbox-agent/net-allow plus the project's net:
+#             global ~/.config/sandbox-agent/internet plus the project's internet:
 #             lines, both re-read at every request, so `sandbox-agent allow`
 #             opens a host in a running session. Never host-local addresses
-#             (loopback, link-local) unless declared with connect:.
-#   connect:  a host service the sandbox may reach, declared in .sandbox-mounts
+#             (loopback, link-local) unless declared with host:.
+#   host:     a host service the sandbox may reach, declared in .sandbox-mounts
 #             (approved like mounts): the relay inside listens on the same
 #             ip:port and tunnels each connection through the proxy.
-#   publish:  a dev server inside that the host must reach (your own browser):
+#   expose:   a dev server inside that the host must reach (your own browser):
 #             the host listens on ip:port and hands each connection in.
 #
 # Programs that ignore HTTP(S)_PROXY cannot get out at all: they fail with
@@ -42,7 +42,7 @@ module SandboxNet
 
   PROXY_LISTEN = ["127.0.0.1", 3128].freeze
   RELAY = File.join(__dir__, "sandbox-net-relay")
-  ALLOW_FILE = File.expand_path("~/.config/sandbox-agent/net-allow")
+  ALLOW_FILE = File.expand_path("~/.config/sandbox-agent/internet")
 
   # Loopback names and the reserved dev TLDs stay inside the sandbox: they mean
   # the sandbox's own servers, never something for the proxy to fetch.
@@ -85,7 +85,7 @@ module SandboxNet
     []
   end
 
-  # The allowlist: net-allow plus a project's net: lines.
+  # The allowlist: ~/.config/sandbox-agent/internet plus a project's internet: lines.
   #
   #   example.org      the name and every subdomain (*.example.org: the same)
   #   203.0.113.7      an address, for a host with no name
@@ -136,30 +136,30 @@ module SandboxNet
   end
 
   # [:allow | :deny, reason].
-  def verdict(host, port, addrs, connect, allow)
-    return [:allow, "declared"] if addrs.any? { |a| connect.include?([a, port]) }
+  def verdict(host, port, addrs, to_host, allow)
+    return [:allow, "declared"] if addrs.any? { |a| to_host.include?([a, port]) }
 
     local = addrs.find { |a| host_local?(IPAddr.new(a)) }
-    return [:deny, "#{local} is local to the host; declare it with connect: in .sandbox-mounts"] if local
+    return [:deny, "#{local} is local to the host; declare it with host: in .sandbox-mounts"] if local
     return [:allow, nil] if allow.match(host, addrs)
 
-    [:deny, "#{host} is not on the allowlist: add net:#{host} to .sandbox-mounts, " \
+    [:deny, "#{host} is not on the allowlist: add internet:#{host} to .sandbox-mounts, " \
             "then ask the user to run `sandbox-agent allow`"]
   end
 
-  # The hosts in a .sandbox-mounts text's net: lines.
-  def net_hosts(text)
+  # The hosts in a .sandbox-mounts text's internet: lines.
+  def internet_hosts(text)
     text.to_s.each_line.filter_map do |line|
       line = line.strip.sub(/\s+#.*\z/, "")
-      line.match(/\Anet:\s*(\S+)\z/)&.[](1)
+      line.match(/\Ainternet:\s*(\S+)\z/)&.[](1)
     end
   end
 
-  # The allowlist as of now: the global file plus the project's approved net:
+  # The allowlist as of now: the global file plus the project's approved internet:
   # lines. Called at every request, so an approval reaches running sessions.
   def allowlist(approved_mounts_text)
     global = File.exist?(ALLOW_FILE) ? File.read(ALLOW_FILE) : ""
-    HostList.parse([global, *net_hosts(approved_mounts_text)].join("\n"))
+    HostList.parse([global, *internet_hosts(approved_mounts_text)].join("\n"))
   end
 
   # [:connect | :http, host, port], or nil for anything that is not a proxy request.
@@ -221,7 +221,7 @@ module SandboxNet
                  "X-Sandbox-Reason: #{reason}\r\n\r\nsandbox-agent proxy: #{reason}\n")
   end
 
-  def handle_proxy_client(client, connect, allow, log)
+  def handle_proxy_client(client, to_host, allow, log)
     head = client.gets("\r\n\r\n", 65_536)
     kind, host, port = parse_request_head(head)
     return refuse(client, 400, "not a proxy request") unless kind
@@ -232,7 +232,7 @@ module SandboxNet
       return refuse(client, 502, "#{host} does not resolve")
     end
 
-    action, reason = verdict(host, port, addrs, connect, allow.call)
+    action, reason = verdict(host, port, addrs, to_host, allow.call)
     log.call(action, host, port, reason)
     return refuse(client, 403, reason) if action == :deny
 
@@ -252,34 +252,34 @@ module SandboxNet
     attr_reader :env, :info_path
 
     # allow: a callable returning the current allowlist (a HostList).
-    def initialize(dir, connect:, publish:, allow:, log:)
+    def initialize(dir, to_host:, expose:, allow:, log:)
       @dir = dir
       @servers = []
       proxy_socket = File.join(dir, "proxy.sock")
-      publish_socket = File.join(dir, "publish.sock")
+      expose_socket = File.join(dir, "expose.sock")
 
       proxy = UNIXServer.new(proxy_socket)
       @servers << proxy
-      SandboxNet.serve(proxy) { |c| SandboxNet.handle_proxy_client(c, connect, allow, log) }
+      SandboxNet.serve(proxy) { |c| SandboxNet.handle_proxy_client(c, to_host, allow, log) }
 
-      publish.each do |ip, port|
+      expose.each do |ip, port|
         server = begin
           TCPServer.new(ip, port)
         rescue SystemCallError => e
-          warn "publish #{ip}:#{port}: #{e.message} (the host cannot reach it this session)"
+          warn "expose #{ip}:#{port}: #{e.message} (the host cannot reach it this session)"
           next
         end
         @servers << server
         SandboxNet.serve(server) do |client|
-          inside = UNIXSocket.new(publish_socket)
+          inside = UNIXSocket.new(expose_socket)
           inside.write("#{ip}:#{port}\n")
           SandboxNet.splice(client, inside)
         end
       end
 
       @config = File.join(dir, "net.json")
-      File.write(@config, JSON.generate(proxy_socket: proxy_socket, publish_socket: publish_socket,
-                                        proxy_listen: PROXY_LISTEN, connect: connect, publish: publish))
+      File.write(@config, JSON.generate(proxy_socket: proxy_socket, expose_socket: expose_socket,
+                                        proxy_listen: PROXY_LISTEN, to_host: to_host, expose: expose))
       proxy_url = "http://#{PROXY_LISTEN.join(':')}"
       @env = { "HTTP_PROXY" => proxy_url, "HTTPS_PROXY" => proxy_url,
                "http_proxy" => proxy_url, "https_proxy" => proxy_url,
@@ -297,8 +297,8 @@ module SandboxNet
     end
   end
 
-  def start(dir, connect:, publish:, allow:, log:)
-    Session.new(dir, connect: connect, publish: publish, allow: allow, log: log)
+  def start(dir, to_host:, expose:, allow:, log:)
+    Session.new(dir, to_host: to_host, expose: expose, allow: allow, log: log)
   end
 
   # One log per project, kept across sessions: what to read before turning a
@@ -322,7 +322,7 @@ module SandboxNet
 
   # What an agent inside needs to make sense of a network failure, at the path
   # in $SANDBOX_NETWORK_INFO.
-  def info_text(connect_lines:, publish_lines:, log_path:)
+  def info_text(host_lines:, expose_lines:, log_path:)
     list = ->(lines) { lines.empty? ? "  (none)\n" : lines.map { |l| "  #{l}\n" }.join }
     <<~TXT
       This sandbox has a private network: its own loopback, and no route out.
@@ -337,18 +337,18 @@ module SandboxNet
       The proxy only lets through allowlisted hosts. A refused host gets HTTP
       403, and every request, allowed or refused, is logged with its reason in:
         #{log_path}
-      To ask for a host, add a net: line to .sandbox-mounts, e.g.
-      net:guides.rubyonrails.org (a name covers its subdomains), and ask the
+      To ask for a site, add an internet: line to .sandbox-mounts, e.g.
+      internet:guides.rubyonrails.org (a name covers its subdomains), and ask the
       user to run `sandbox-agent allow`. It works at once, no restart. You
       cannot approve it yourself. The host's own addresses (loopback,
-      link-local) are never reachable unless declared with connect:.
+      link-local) are never reachable unless declared with host:.
 
-      Host services this sandbox may reach (connect: lines in .sandbox-mounts):
-      #{list.call(connect_lines)}
-      Servers in here that the host reaches (publish: lines):
-      #{list.call(publish_lines)}
-      To ask for another host service, add a connect: line to .sandbox-mounts,
-      e.g. connect:127.1.0.2:5432, and ask the user to run `sandbox-agent allow`.
+      Host services this sandbox may reach (host: lines in .sandbox-mounts):
+      #{list.call(host_lines)}
+      Servers in here that the host reaches (expose: lines):
+      #{list.call(expose_lines)}
+      To ask for another host service, add a host: line to .sandbox-mounts,
+      e.g. host:127.1.0.2:5432, and ask the user to run `sandbox-agent allow`.
       It takes effect at the next launch. You cannot approve it yourself.
     TXT
   end
@@ -364,13 +364,13 @@ module SandboxNet
 
   def run_relay(config, cmd)
     proxy_socket = config.fetch("proxy_socket")
-    publish = config.fetch("publish")
+    expose = config.fetch("expose")
 
     if (server = listen_tcp(*config.fetch("proxy_listen")))
       serve(server) { |client| splice(client, UNIXSocket.new(proxy_socket)) }
     end
 
-    config.fetch("connect").each do |ip, port|
+    config.fetch("to_host").each do |ip, port|
       next unless (server = listen_tcp(ip, port))
 
       serve(server) do |client|
@@ -381,10 +381,10 @@ module SandboxNet
       end
     end
 
-    unless publish.empty?
-      serve(UNIXServer.new(config.fetch("publish_socket"))) do |host_side|
+    unless expose.empty?
+      serve(UNIXServer.new(config.fetch("expose_socket"))) do |host_side|
         ip, port = host_side.gets.to_s.strip.split(":")
-        next unless publish.include?([ip, port.to_i])
+        next unless expose.include?([ip, port.to_i])
 
         splice(host_side, TCPSocket.new(ip, port.to_i))
       end
