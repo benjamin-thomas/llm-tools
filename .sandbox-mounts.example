@@ -5,6 +5,10 @@
 #   ro:/path          — read-only mount
 #   rw:/path          — read-write mount
 #   path:/path/bin    — add to PATH
+#   connect:IP:PORT   — a host service the sandbox may reach (its network is
+#                       private), e.g. connect:127.1.0.2:5432; IP/PREFIX for a
+#                       range, PORT,PORT for several ports
+#   publish:IP:PORT   — a server inside the sandbox that the host must reach
 #
 # Paths starting with ~ are expanded to $HOME.
 # Lines starting with # are comments. Blank lines are ignored.

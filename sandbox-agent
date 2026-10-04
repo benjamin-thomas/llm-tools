@@ -22,6 +22,11 @@
 #   thinking it is your own. They were only here for commit signing; sign on
 #   the host instead.
 #
+#   The host network. A sandbox has its own (--unshare-net): no route to
+#   whatever the host reaches, no ssh tunnel left open on localhost, no
+#   abstract unix socket. The way out is a logging proxy run from here, plus
+#   the host services a project declares with connect: — see sandbox-net.rb.
+#
 #   The session D-Bus socket (/run/user/<uid>/bus). It is the Secret Service
 #   API: KWallet and gnome-keyring hand out saved passwords over it. This —
 #   not the X11 passthrough — is how an agent ends up talking to kwalletd.
@@ -65,6 +70,7 @@ require "tmpdir"
 # is what only an interactive agent session needs: the multiplexer, and the
 # flags that drive it.
 require_relative "sandbox-lib"
+require_relative "sandbox-net"
 
 # module_function also defines these as private instance methods, so the
 # multiplexer block below can keep calling ro/rw unqualified.
@@ -171,6 +177,19 @@ parser = OptionParser.new do |opts|
   opts.separator "  path:/path/bin    — add to PATH"
   opts.separator "  (leading ~ is expanded to $HOME)"
   opts.separator ""
+  opts.separator "The sandbox has a private network. The internet goes through a proxy"
+  opts.separator "(HTTP(S)_PROXY) that lets through only allowlisted hosts. The same file"
+  opts.separator "declares more hosts and the doors to the host:"
+  opts.separator "  net:HOST                    — a host to allow on top of the global list"
+  opts.separator "                                (~/.config/sandbox-agent/net-allow); a name"
+  opts.separator "                                covers its subdomains. Applies at once."
+  opts.separator "  connect:IP:PORT[,PORT]      — a host service the sandbox may reach,"
+  opts.separator "                                e.g. connect:127.1.0.2:5432 (dev Postgres)"
+  opts.separator "  connect:IP/PREFIX:PORT      — the same for a whole range of dev IPs"
+  opts.separator "  publish:IP:PORT[,PORT]      — a server inside the host must reach (your"
+  opts.separator "                                browser on a dev server)"
+  opts.separator "  Every request is logged in ~/.local/state/sandbox-agent/net/."
+  opts.separator ""
   opts.separator "Typical .sandbox-mounts recipes (lines below are copy-paste ready):"
   opts.separator ""
   opts.separator "# Haskell (ghcup + cabal)"
@@ -240,12 +259,23 @@ exit SandboxLib.approve_mounts!(project_dir) if allow
 # .sandbox-mounts is a request written by the project, not an authorization.
 SandboxLib.require_mounts_approval!(project_dir, "sandbox-agent")
 
+# Network doors the project declared (approved above). Checked now, before
+# anything is created, so a bad line stops the launch with nothing to clean up.
+net_lines = SandboxLib.parse_sandbox_mounts(project_dir, ENV.fetch("HOME"))
+                      .select { |m| %w[connect publish].include?(m[:mode]) }
+net_endpoints = Hash.new { |h, k| h[k] = [] }
+net_lines.each do |m|
+  net_endpoints[m[:mode]].concat(SandboxNet.parse_endpoints(m[:path]))
+rescue ArgumentError => e
+  abort "Bad line in .sandbox-mounts: #{m[:line]}\n  #{e.message}"
+end
+
 # Shown at every launch, right where you stop to answer the .git question, until
 # the PENDING items at the top of sandbox-lib.rb are done. Delete it with them.
 pending = <<~TXT
-  ⚠ PENDING sandbox hardening: toolchains (rbenv, nvm, ghcup, caches) are rw,
-    dev servers may run on the host, and the network is shared — sandbox-written
-    code can still run outside. See PENDING in sandbox-lib.rb.
+  ⚠ PENDING sandbox hardening: toolchains (rbenv, nvm, ghcup, caches) are rw
+    and dev servers may run on the host — sandbox-written code can still run
+    outside. See PENDING in sandbox-lib.rb.
 TXT
 warn($stderr.tty? ? "\e[33m#{pending}\e[0m" : pending)
 
@@ -404,6 +434,30 @@ if flags[:gui]
     SandboxX11.watch_screen(screen)
   end
 end
+
+# --- private network ---
+#
+# The sandbox has its own network namespace (--unshare-net, in the lib); these
+# are its doors, served from here like the clipboard bridge. See sandbox-net.rb.
+
+net_log = SandboxNet.log_path(project_dir)
+net = SandboxNet.start(socket_dir,
+                       connect: net_endpoints["connect"].uniq,
+                       publish: net_endpoints["publish"].uniq,
+                       # The approved copy, never the project's file: an agent
+                       # can edit that one. Re-read at every request.
+                       allow: -> { SandboxNet.allowlist(SandboxLib.approved_content(project_dir)) },
+                       log: SandboxNet.logger(net_log))
+net_info = File.join(socket_dir, "NETWORK.txt")
+File.write(net_info, SandboxNet.info_text(
+  connect_lines: net_lines.select { |m| m[:mode] == "connect" }.map { |m| m[:line] },
+  publish_lines: net_lines.select { |m| m[:mode] == "publish" }.map { |m| m[:line] },
+  log_path: net_log
+))
+net.env.each { |key, value| args.push("--setenv", key, value) }
+args.push("--setenv", "SANDBOX_NETWORK_INFO", net_info,
+          "--setenv", "SANDBOX_NET_LOG", net_log)
+cmd = net.wrap(cmd)
 
 # --- host-side registry for herdr-hub ---
 #

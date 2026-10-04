@@ -23,8 +23,9 @@ class SandboxInvariantsTest < Minitest::Test
     FileUtils.remove_entry(@home)
   end
 
-  # The smallest argument list that passes: the host environment cleared.
-  def base = ["--clearenv"]
+  # The smallest argument list that passes: the host environment cleared, and
+  # a network of its own.
+  def base = ["--clearenv", "--unshare-net"]
 
   def violations(args) = SandboxLib.invariant_violations(args, home: @home, uid: UID)
 
@@ -103,7 +104,11 @@ class SandboxInvariantsTest < Minitest::Test
   end
 
   def test_missing_clearenv_is_refused
-    refute_empty violations([])
+    refute_empty violations(["--unshare-net"])
+  end
+
+  def test_shared_network_is_refused
+    refute_empty violations(["--clearenv"])
   end
 
   def test_violation_names_the_path

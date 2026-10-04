@@ -22,14 +22,9 @@
 #    hole as 1, every day. Fix: run everything that executes project code
 #    inside the sandbox, with only databases (docker) left on the host.
 #
-# 3. The network is the host's. No --unshare-net yet: the sandbox reaches
-#    whatever the host reaches, localhost tunnels included, plus abstract unix
-#    sockets (session buses among them). Fix: a private network namespace,
-#    a filtering proxy on the host (log-only first), bridges for declared ports.
-#
-# 1 and 3 have a rule waiting, commented out, in invariant_violations below (2
-# lives in each project's setup, out of reach of a check here). sandbox-agent
-# prints a short yellow warning at every launch until all three are done.
+# 1 has a rule waiting, commented out, in invariant_violations below (2 lives in
+# each project's setup). sandbox-agent prints a short yellow warning at every
+# launch until both are done.
 # =============================================================================
 
 require "digest"
@@ -188,6 +183,8 @@ module SandboxLib
     bind_git_metadata!(args, path, writable: git_writable)
   end
 
+  NET_MODES = %w[connect publish net].freeze
+
   # Parse .sandbox-mounts into [{mode:, path:, target:, line:}].
   #
   # `path` is where we mount (as written, ~ expanded) and `target` is that with
@@ -209,6 +206,11 @@ module SandboxLib
       if path.nil? || path.strip.empty?
         warn "Malformed line in .sandbox-mounts: #{line}"
         next
+      end
+
+      # connect:/publish:/net: name network endpoints, not paths (sandbox-net.rb).
+      if NET_MODES.include?(mode)
+        next({ mode: mode, path: path.strip, target: path.strip, line: line })
       end
 
       expanded = File.expand_path(path.strip)
@@ -401,6 +403,7 @@ module SandboxLib
     File.write(File.join(APPROVAL_DIR, digest), File.read(mounts_file(project_dir)))
     File.write(approval_pointer(project_dir), digest)
     puts "Approved. Any edit to the file will ask again."
+    puts "net: lines apply now, running sessions included; everything else at the next launch."
     0
   end
 
@@ -506,10 +509,9 @@ module SandboxLib
       violations << "--setenv #{name} hands over a host agent" if flag == "--setenv" && FORBIDDEN_ENV.include?(name)
     end
     violations << "no --clearenv: the host environment would leak in" unless args.include?("--clearenv")
+    violations << "no --unshare-net: the sandbox would share the host network" unless args.include?("--unshare-net")
 
-    # PENDING — switch these on once the matching lockdown has landed:
-    #
-    # violations << "no --unshare-net: the sandbox shares the host network" unless args.include?("--unshare-net")
+    # PENDING — switch this on once the matching lockdown has landed:
     #
     # writable = args.each_cons(2).select { |flag, _| %w[--bind --dev-bind].include?(flag) }.map(&:last)
     # %W[#{home}/.rbenv #{home}/.nvm #{home}/.ghcup #{home}/.bundle #{home}/.npm
@@ -874,6 +876,7 @@ module SandboxLib
       when "ro"   then args.push(*ro(path)) if File.exist?(path)
       when "rw"   then bind_rw_mount!(args, path, git_writable: git_rw) if File.exist?(path)
       when "path" then extra_path_dirs << path
+      when *NET_MODES then nil # opened by sandbox-agent, see sandbox-net.rb
       else warn "Unknown mount mode '#{mount[:mode]}' in .sandbox-mounts: #{mount[:line]}"
       end
     end
@@ -890,7 +893,9 @@ module SandboxLib
     end
     ssh_masks.each { |path| args.push(*mask(path)) if File.exist?(path) }
 
-    args.push("--unshare-pid", "--die-with-parent", "--chdir", project_dir)
+    # A private network: loopback only. The way out is the proxy sandbox-agent
+    # runs on the host — see sandbox-net.rb.
+    args.push("--unshare-net", "--unshare-pid", "--die-with-parent", "--chdir", project_dir)
 
     colorterm = ENV.fetch("COLORTERM", "truecolor")
     lang      = ENV.fetch("LANG", "en_US.UTF-8")
