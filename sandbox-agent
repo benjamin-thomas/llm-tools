@@ -281,7 +281,11 @@ args = SandboxLib.build_base_args(
 # HERDR_SOCKET_PATH; both host sockets are additionally out of reach because
 # $HOME is a tmpfs and neither /tmp nor ~/.config/herdr is mounted through.
 
-socket_dir = Dir.mktmpdir("sandbox-agent-")
+# Under $XDG_RUNTIME_DIR rather than /tmp: that is where per-user sockets belong
+# (yours alone, in memory, cleared at logout). /tmp only if it is missing.
+runtime_dir = ENV["XDG_RUNTIME_DIR"]
+runtime_dir = nil unless runtime_dir && File.directory?(runtime_dir)
+socket_dir = Dir.mktmpdir("sandbox-agent-", runtime_dir)
 args.push(*rw(socket_dir))
 
 case flags[:mux]
