@@ -12,6 +12,13 @@
 #   gnome-keyring and gpg-agent ssh sockets, the ssh/scp/sftp binaries. An
 #   agent holding an ssh agent socket can log into every host you can.
 #
+#   GnuPG and the password store: ~/.gnupg, ~/.password-store and the host
+#   gpg-agent socket dir (/run/user/<uid>/gnupg). The host agent holds the
+#   unlocked key, so with its socket an agent decrypts every pass entry the
+#   moment the passphrase is cached — or pops a pinentry you would answer,
+#   thinking it is your own. They were only here for commit signing; sign on
+#   the host instead.
+#
 #   The session D-Bus socket (/run/user/<uid>/bus). It is the Secret Service
 #   API: KWallet and gnome-keyring hand out saved passwords over it. This —
 #   not the X11 passthrough — is how an agent ends up talking to kwalletd.
@@ -41,9 +48,8 @@
 #
 # Still granted, for the record: the CLIPBOARD selection through the bridge
 # (an agent can read whatever you copy there, at any time — set
-# PASSWORD_STORE_X_SELECTION=primary to keep `pass -c` out of it), ~/.password-store
-# + ~/.gnupg ro (commit signing), ~/.cache rw, ~/.local ro, audio devices, the
-# project dir rw.
+# PASSWORD_STORE_X_SELECTION=primary to keep `pass -c` out of it), ~/.cache rw,
+# ~/.local ro, audio devices, the project dir rw.
 
 require "fileutils"
 require "json"

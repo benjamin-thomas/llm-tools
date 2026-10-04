@@ -452,9 +452,6 @@ module SandboxLib
     nvm_bin        = nil if nvm_bin.empty?
     gitconfig      = "#{home}/.gitconfig"
     gitignore      = "#{home}/.gitignore"
-    password_store = "#{home}/.password-store"
-    gnupg_dir      = "#{home}/.gnupg"
-    gpg_agent_dir  = "/run/user/#{Process.uid}/gnupg"
     resolvconf_dir =
       if    Dir.exist?("/run/resolvconf")       then "/run/resolvconf"
       elsif Dir.exist?("/run/systemd/resolve")  then "/run/systemd/resolve"
@@ -465,9 +462,6 @@ module SandboxLib
 
     require_dir!  project_dir,    "Project directory"
     require_file! gitconfig,      "Git config"
-    require_dir!  password_store, "Password store (~/.password-store)"
-    require_dir!  gnupg_dir,      "GnuPG directory (~/.gnupg)"
-    require_dir!  gpg_agent_dir,  "GPG agent socket dir"
     require_dir!  resolvconf_dir, "DNS resolver"
 
     # --- build bwrap args ---
@@ -759,8 +753,6 @@ module SandboxLib
       args.push(*ro(nvm_node_dir)) if File.directory?(nvm_node_dir)
     end
 
-    args.push(*ro(password_store), *ro(gnupg_dir), *ro(gpg_agent_dir))
-
     # --- Project-specific extra mounts (.sandbox-mounts) ---
     #
     # Parsed further up (the symlink check needs the declarations); applied here so
@@ -810,16 +802,14 @@ module SandboxLib
 
     # --- no SSH, last word ---
     #
-    # gpg-agent doubles as an ssh agent, and its socket dir has to be mounted for
-    # commit signing / pass — so mask that one socket. The client binaries go too:
-    # with no keys and no agent they are already toothless, but masking them keeps
-    # the rule simple (there is no ssh in here). /bin and /usr/bin are bound
-    # separately above, hence both paths. Placed after .sandbox-mounts on purpose:
-    # in bwrap the last mount wins, so nothing above can undo this.
+    # No keys and no agent reach the sandbox, so the client binaries are already
+    # toothless; masking them anyway keeps the rule simple (there is no ssh in
+    # here). /bin and /usr/bin are bound separately above, hence both paths.
+    # Placed after .sandbox-mounts on purpose: in bwrap the last mount wins, so
+    # nothing above can undo this.
     ssh_masks = %w[ssh scp sftp ssh-add ssh-agent ssh-keygen ssh-keyscan].flat_map do |name|
       %w[/usr/bin /bin /usr/local/bin].map { |dir| File.join(dir, name) }
     end
-    ssh_masks << "#{gpg_agent_dir}/S.gpg-agent.ssh"
     ssh_masks.each { |path| args.push(*mask(path)) if File.exist?(path) }
 
     args.push("--unshare-pid", "--die-with-parent", "--chdir", project_dir)
