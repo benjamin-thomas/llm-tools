@@ -591,9 +591,15 @@ module SandboxLib
     # sandbox-x11.rb, and the private screen sandbox-agent provides instead. The
     # tmpfs /tmp leaves a sandbox-local Xvfb free to create its own socket.
 
-    # IDE connection sockets
-    claude_ipc = "/tmp/claude-#{Process.uid}"
-    args.push(*rw(claude_ipc)) if File.directory?(claude_ipc)
+    # IDE integration (an agent inside talking to an IDE on the host: diffs,
+    # selection sharing) is deliberately unsupported. It runs over localhost
+    # websockets on a port that changes at every IDE start, which a private
+    # network would have to bridge, and the link is unsafe by nature anyway: the
+    # IDE end can start an agent outside any sandbox. Not worth the plumbing.
+    #
+    # Hence no /tmp/claude-<uid> either. It was mounted for that, rw, which made
+    # it one directory shared by every sandbox and the host's own Claude Code
+    # (extracted skills, scripts). Each sandbox now gets its own, in its /tmp.
 
     # DNS
     args.push(*ro(resolvconf_dir))
