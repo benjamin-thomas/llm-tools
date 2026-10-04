@@ -240,6 +240,15 @@ exit SandboxLib.approve_mounts!(project_dir) if allow
 # .sandbox-mounts is a request written by the project, not an authorization.
 SandboxLib.require_mounts_approval!(project_dir, "sandbox-agent")
 
+# Shown at every launch, right where you stop to answer the .git question, until
+# the PENDING items at the top of sandbox-lib.rb are done. Delete it with them.
+pending = <<~TXT
+  ⚠ PENDING sandbox hardening: toolchains (rbenv, nvm, ghcup, caches) are rw,
+    dev servers may run on the host, and the network is shared — sandbox-written
+    code can still run outside. See PENDING in sandbox-lib.rb.
+TXT
+warn($stderr.tty? ? "\e[33m#{pending}\e[0m" : pending)
+
 # Asked rather than left to memory: the answer is needed before the sandbox
 # exists, and inside it the mount can no longer be changed. Always asked, never
 # taken from a flag: a flag is something a script (or an agent writing one)
