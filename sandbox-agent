@@ -67,7 +67,7 @@ require_relative "sandbox-lib"
 # multiplexer block below can keep calling ro/rw unqualified.
 include SandboxLib
 
-flags = { git_rw: nil, mux: "herdr", gui: true, write: false, mounts: [], setenv: [] }
+flags = { mux: "herdr", gui: true, write: false, mounts: [], setenv: [] }
 
 # `doctor` is a subcommand, not a flag: it takes a project dir and no command.
 if (allow = ARGV.first == "allow")
@@ -92,9 +92,6 @@ parser = OptionParser.new do |opts|
   opts.separator "else under $HOME."
   opts.separator ""
 
-  opts.on("--git-rw", "Allow writing to .git (skips the prompt)") { flags[:git_rw] = true }
-  opts.on("--no-git-rw", "Keep .git read-only (skips the prompt). Pass this from",
-          "scripts that already asked, so the user is not asked twice") { flags[:git_rw] = false }
   opts.on("--mux MUX", %w[herdr tmux none],
           "Multiplexer for the sandboxed session: herdr (default), tmux, or",
           "none (run the command directly — for servers whose stdout you parse)") do |mux|
@@ -254,28 +251,23 @@ exit SandboxLib.approve_mounts!(project_dir) if allow
 SandboxLib.require_mounts_approval!(project_dir, "sandbox-agent")
 
 # Asked rather than left to memory: the answer is needed before the sandbox
-# exists, and inside it the mount can no longer be changed. Same reasoning as
-# manage/session, which already asks. A caller that has already asked passes
-# --git-rw / --no-git-rw (or sets SANDBOX_AGENT_GIT_RW) so the user is not asked
-# twice.
-if flags[:git_rw].nil? && !ENV["SANDBOX_AGENT_GIT_RW"].nil?
-  flags[:git_rw] = %w[1 true yes y].include?(ENV["SANDBOX_AGENT_GIT_RW"].downcase)
-end
-if flags[:git_rw].nil?
-  flags[:git_rw] =
-    if $stdin.tty?
-      $stderr.print "Let this session write to .git? [y/N] "
-      %w[y yes].include?($stdin.gets.to_s.strip.downcase)
-    else
-      false
-    end
-  warn "Starting with .git read-only." unless flags[:git_rw]
-end
+# exists, and inside it the mount can no longer be changed. Always asked, never
+# taken from a flag: a flag is something a script (or an agent writing one)
+# can pass on your behalf. Without a terminal there is no one to ask, so .git
+# stays read-only.
+git_rw =
+  if $stdin.tty?
+    $stderr.print "Let this session write to .git? [y/N] "
+    %w[y yes].include?($stdin.gets.to_s.strip.downcase)
+  else
+    false
+  end
+warn "Starting with .git read-only." unless git_rw
 
 home = ENV.fetch("HOME")
 args = SandboxLib.build_base_args(
   project_dir,
-  git_rw: flags[:git_rw],
+  git_rw: git_rw,
   headless: false,          # interactive: someone is watching, no /sys needed
   command: cmd.first,
   extra_mounts: flags[:mounts],

@@ -157,9 +157,10 @@ module SandboxLib
   end
 
   # The one way to grant write access to a directory: code writable, git history
-  # read-only unless --git-rw. Guarded on the mount root being a repo root, so a
-  # repo nested inside a mount (ruby-advisory-db under ~/.local/share, which
-  # bundle-audit updates via git fetch) keeps the writable .git its tooling needs.
+  # read-only unless the user allowed it at launch. Guarded on the mount root
+  # being a repo root, so a repo nested inside a mount (ruby-advisory-db under
+  # ~/.local/share, which bundle-audit updates via git fetch) keeps the writable
+  # .git its tooling needs.
   def bind_rw_mount!(args, path, git_writable:)
     args.push(*rw(path))
     return unless File.exist?(File.join(path, ".git"))
