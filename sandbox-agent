@@ -25,7 +25,7 @@
 #   The host network. A sandbox has its own (--unshare-net): no route to
 #   whatever the host reaches, no ssh tunnel left open on localhost, no
 #   abstract unix socket. The way out is a logging proxy run from here, plus
-#   the host services a project declares with host: — see sandbox-net.rb.
+#   the host services a project declares with host: — see sandbox-network.rb.
 #
 #   The session D-Bus socket (/run/user/<uid>/bus). It is the Secret Service
 #   API: KWallet and gnome-keyring hand out saved passwords over it. This —
@@ -70,7 +70,7 @@ require "tmpdir"
 # is what only an interactive agent session needs: the multiplexer, and the
 # flags that drive it.
 require_relative "sandbox-lib"
-require_relative "sandbox-net"
+require_relative "sandbox-network"
 
 # module_function also defines these as private instance methods, so the
 # multiplexer block below can keep calling ro/rw unqualified.
@@ -149,7 +149,7 @@ parser = OptionParser.new do |opts|
   opts.separator "--mux tmux swaps herdr back for tmux."
   opts.separator ""
   opts.separator "herdr launches made from inside a host tmux session are recorded in"
-  opts.separator "~/.local/state/sandbox-agent (removed on exit) so the host-side companion"
+  opts.separator "~/.sandbox-agent/herdr-registry (removed on exit) so the host-side companion"
   opts.separator "`herdr-hub` can flag which tmux session's agent needs attention."
   opts.separator ""
   opts.separator "Examples:"
@@ -183,7 +183,7 @@ parser = OptionParser.new do |opts|
   opts.separator "  internet:HOST           sandbox -> internet. The sandbox may reach this"
   opts.separator "                          site (HTTP/HTTPS, through a proxy). A name covers"
   opts.separator "                          its subdomains. Adds to the list every project"
-  opts.separator "                          gets, ~/.config/sandbox-agent/internet."
+  opts.separator "                          gets: ~/.sandbox-agent/internet-allowlist"
   opts.separator "                          Applies at once, running sessions included."
   opts.separator "                          e.g. internet:guides.rubyonrails.org"
   opts.separator ""
@@ -198,7 +198,7 @@ parser = OptionParser.new do |opts|
   opts.separator "                          Applies at the next launch."
   opts.separator "                          e.g. expose:127.1.0.1:3000 (dev server)"
   opts.separator ""
-  opts.separator "  Every request out is logged in ~/.local/state/sandbox-agent/net/."
+  opts.separator "  Every request out is logged in ~/.sandbox-agent/network-log/."
   opts.separator ""
   opts.separator "Typical .sandbox-mounts recipes (lines below are copy-paste ready):"
   opts.separator ""
@@ -275,7 +275,7 @@ net_lines = SandboxLib.parse_sandbox_mounts(project_dir, ENV.fetch("HOME"))
                       .select { |m| %w[host expose].include?(m[:mode]) }
 net_endpoints = Hash.new { |h, k| h[k] = [] }
 net_lines.each do |m|
-  net_endpoints[m[:mode]].concat(SandboxNet.parse_endpoints(m[:path]))
+  net_endpoints[m[:mode]].concat(SandboxNetwork.parse_endpoints(m[:path]))
 rescue ArgumentError => e
   hint = m[:mode] == "host" ? "\n  (host: is a service on this machine; for a website, use internet:)" : ""
   abort "Bad line in .sandbox-mounts: #{m[:line]}\n  #{e.message}#{hint}"
@@ -449,25 +449,30 @@ end
 # --- private network ---
 #
 # The sandbox has its own network namespace (--unshare-net, in the lib); these
-# are its doors, served from here like the clipboard bridge. See sandbox-net.rb.
+# are its doors, served from here like the clipboard bridge. See sandbox-network.rb.
 
-net_log = SandboxNet.log_path(project_dir)
-net = SandboxNet.start(socket_dir,
+net_log = SandboxNetwork.log_path(project_dir)
+# The one piece of ~/.sandbox-agent a sandbox sees: its own log, read-only, so
+# an agent can read why it was refused (and never another project's log).
+FileUtils.mkdir_p(File.dirname(net_log))
+FileUtils.touch(net_log)
+args.push(*ro(net_log))
+net = SandboxNetwork.start(socket_dir,
                        to_host: net_endpoints["host"].uniq,
                        expose: net_endpoints["expose"].uniq,
                        # The approved copy, never the project's file: an agent
                        # can edit that one. Re-read at every request.
-                       allow: -> { SandboxNet.allowlist(SandboxLib.approved_content(project_dir)) },
-                       log: SandboxNet.logger(net_log))
+                       allow: -> { SandboxNetwork.allowlist(SandboxLib.approved_content(project_dir)) },
+                       log: SandboxNetwork.logger(net_log))
 net_info = File.join(socket_dir, "NETWORK.txt")
-File.write(net_info, SandboxNet.info_text(
+File.write(net_info, SandboxNetwork.info_text(
   host_lines: net_lines.select { |m| m[:mode] == "host" }.map { |m| m[:line] },
   expose_lines: net_lines.select { |m| m[:mode] == "expose" }.map { |m| m[:line] },
   log_path: net_log
 ))
 net.env.each { |key, value| args.push("--setenv", key, value) }
 args.push("--setenv", "SANDBOX_NETWORK_INFO", net_info,
-          "--setenv", "SANDBOX_NET_LOG", net_log)
+          "--setenv", "SANDBOX_NETWORK_LOG", net_log)
 cmd = net.wrap(cmd)
 
 # --- host-side registry for herdr-hub ---
@@ -475,9 +480,9 @@ cmd = net.wrap(cmd)
 # Recorded now, on the host, because both facts stop being knowable later:
 # which tmux session this launch came from (gone once bwrap starts), and where
 # the sandboxed herdr socket lives (the sandbox must never learn the mapping).
-# It goes under ~/.local/state — outside every sandbox mount — because
-# herdr-hub feeds these values into host tmux commands, and anything under
-# socket_dir is agent-writable.
+# It goes under ~/.sandbox-agent, which no sandbox mounts, because herdr-hub
+# feeds these values into host tmux commands, and anything under socket_dir is
+# agent-writable.
 if flags[:mux] == "herdr" && ENV["TMUX"]
   fmt = '#S|#{window_id}' # tmux format tokens, not Ruby interpolation
   # Without -t, display-message reports the session's current window, not the
@@ -486,7 +491,7 @@ if flags[:mux] == "herdr" && ENV["TMUX"]
   out, _err, tmux_status = Open3.capture3("tmux", "display-message", "-p", *target, fmt)
   session, window_id = out.strip.split("|", 2) if tmux_status.success?
   unless session.to_s.empty?
-    registry_dir = File.join(home, ".local", "state", "sandbox-agent")
+    registry_dir = File.join(home, ".sandbox-agent", "herdr-registry")
     FileUtils.mkdir_p(registry_dir)
     registry_entry = File.join(registry_dir, "#{File.basename(socket_dir)}.json")
     File.write(registry_entry, JSON.generate(

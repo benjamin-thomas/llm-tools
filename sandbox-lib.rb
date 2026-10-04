@@ -183,7 +183,7 @@ module SandboxLib
     bind_git_metadata!(args, path, writable: git_writable)
   end
 
-  NET_MODES = %w[internet host expose].freeze
+  NETWORK_MODES = %w[internet host expose].freeze
 
   # Parse .sandbox-mounts into [{mode:, path:, target:, line:}].
   #
@@ -208,8 +208,8 @@ module SandboxLib
         next
       end
 
-      # internet:/host:/expose: name network endpoints, not paths (sandbox-net.rb).
-      if NET_MODES.include?(mode)
+      # internet:/host:/expose: name network endpoints, not paths (sandbox-network.rb).
+      if NETWORK_MODES.include?(mode)
         next({ mode: mode, path: path.strip, target: path.strip, line: line })
       end
 
@@ -355,7 +355,15 @@ module SandboxLib
   # If you find yourself wanting to add "just a small denylist to be safe": it
   # would be redundant. A dangerous line is visible at approval time, which is
   # the one place a human actually looks.
-  APPROVAL_DIR = File.expand_path("~/.local/share/sandbox-agent/approved")
+  #
+  # The store, outside every sandbox's reach (read-only at most, see Invariants):
+  #
+  #   ~/.sandbox-agent/approvals/
+  #     by-content/<sha256>            each .sandbox-mounts text you approved
+  #     by-project/<project>-<hash>    the sha256 last approved for that project
+  APPROVAL_DIR = File.expand_path("~/.sandbox-agent/approvals")
+
+  def approved_copy(digest) = File.join(APPROVAL_DIR, "by-content", digest)
 
   def mounts_file(project_dir) = File.join(project_dir, ".sandbox-mounts")
 
@@ -367,7 +375,7 @@ module SandboxLib
 
   def mounts_approved?(project_dir)
     digest = mounts_digest(project_dir)
-    digest.nil? || File.exist?(File.join(APPROVAL_DIR, digest))
+    digest.nil? || File.exist?(approved_copy(digest))
   end
 
   # Where the last approved content for THIS project is remembered. The store is
@@ -375,14 +383,15 @@ module SandboxLib
   # so a per-project pointer records which hash was last approved, and that is
   # what the diff below compares against.
   def approval_pointer(project_dir)
-    File.join(APPROVAL_DIR, "by-project", Digest::SHA256.hexdigest(project_dir)[0, 16])
+    name = "#{File.basename(project_dir)}-#{Digest::SHA256.hexdigest(project_dir)[0, 16]}"
+    File.join(APPROVAL_DIR, "by-project", name)
   end
 
   def approved_content(project_dir)
     pointer = approval_pointer(project_dir)
     return nil unless File.exist?(pointer)
 
-    previous = File.join(APPROVAL_DIR, File.read(pointer).strip)
+    previous = approved_copy(File.read(pointer).strip)
     File.exist?(previous) ? File.read(previous) : nil
   end
 
@@ -413,10 +422,10 @@ module SandboxLib
       return 1
     end
 
-    FileUtils.mkdir_p(File.join(APPROVAL_DIR, "by-project"))
+    FileUtils.mkdir_p([File.join(APPROVAL_DIR, "by-content"), File.join(APPROVAL_DIR, "by-project")])
     FileUtils.chmod(0o700, APPROVAL_DIR) rescue nil
     # The content, not an empty marker: it is what a later diff compares against.
-    File.write(File.join(APPROVAL_DIR, digest), File.read(mounts_file(project_dir)))
+    File.write(approved_copy(digest), File.read(mounts_file(project_dir)))
     File.write(approval_pointer(project_dir), digest)
     puts "Approved. Any edit to the file will ask again."
     puts "internet: lines apply now, running sessions included; everything else at the next launch."
@@ -512,16 +521,11 @@ module SandboxLib
     ]
   end
 
-  # sandbox-agent's own state. Readable is fine (~/.local comes through ro),
-  # writable is not: whoever writes the approval store approves their own
-  # mounts and hosts, and the config holds the network allowlist.
-  def own_state_paths(home)
-    [
-      "#{home}/.local/share/sandbox-agent", # approvals
-      "#{home}/.local/state/sandbox-agent", # network logs, herdr-hub registry
-      "#{home}/.config/sandbox-agent",      # the internet allowlist
-    ]
-  end
+  # sandbox-agent's own state, all of it in one directory that no sandbox
+  # mounts (bar its own network log, read-only): approvals, the internet
+  # allowlist, network logs, the herdr-hub registry. Whoever writes there
+  # approves their own mounts and hosts, so it is never writable from inside.
+  def own_state_paths(home) = ["#{home}/.sandbox-agent"]
 
   FORBIDDEN_ENV = %w[SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS GPG_AGENT_INFO].freeze
 
@@ -931,7 +935,7 @@ module SandboxLib
       when "ro"   then args.push(*ro(path)) if File.exist?(path)
       when "rw"   then bind_rw_mount!(args, path, git_writable: git_rw) if File.exist?(path)
       when "path" then extra_path_dirs << path
-      when *NET_MODES then nil # opened by sandbox-agent, see sandbox-net.rb
+      when *NETWORK_MODES then nil # opened by sandbox-agent, see sandbox-network.rb
       else warn "Unknown mount mode '#{mount[:mode]}' in .sandbox-mounts: #{mount[:line]}"
       end
     end
@@ -949,7 +953,7 @@ module SandboxLib
     ssh_masks.each { |path| args.push(*mask(path)) if File.exist?(path) }
 
     # A private network: loopback only. The way out is the proxy sandbox-agent
-    # runs on the host — see sandbox-net.rb.
+    # runs on the host — see sandbox-network.rb.
     args.push("--unshare-net", "--unshare-pid", "--die-with-parent", "--chdir", project_dir)
 
     colorterm = ENV.fetch("COLORTERM", "truecolor")

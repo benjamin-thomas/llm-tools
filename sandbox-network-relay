@@ -1,0 +1,15 @@
+#!/usr/bin/ruby
+
+# First process inside a sandbox with a private network: opens the doors that
+# sandbox-network.rb describes (proxy, host:, expose:), then runs the command
+# and exits with its status.
+#
+#   sandbox-network-relay <net.json> -- <command...>
+
+require "json"
+require_relative "sandbox-network"
+
+config_path, separator, *cmd = ARGV
+abort "usage: sandbox-network-relay <net.json> -- <command...>" unless separator == "--" && !cmd.empty?
+
+exit SandboxNetwork.run_relay(JSON.parse(File.read(config_path)), cmd)

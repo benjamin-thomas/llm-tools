@@ -13,9 +13,9 @@
 #   proxy     HTTP(S) proxy, seen inside as 127.0.0.1:3128 through HTTP(S)_PROXY.
 #             Runs here, on the host, so it decides with the host's DNS and
 #             logs every request. Lets through only allowlisted hosts: the
-#             global ~/.config/sandbox-agent/internet plus the project's internet:
-#             lines, both re-read at every request, so `sandbox-agent allow`
-#             opens a host in a running session. Never host-local addresses
+#             global ~/.sandbox-agent/internet-allowlist plus the
+#             project's internet: lines, both re-read at every request, so
+#             `sandbox-agent allow` opens a host in a running session. Never host-local addresses
 #             (loopback, link-local) unless declared with host:.
 #   host:     a host service the sandbox may reach, declared in .sandbox-mounts
 #             (approved like mounts): the relay inside listens on the same
@@ -37,12 +37,12 @@ require "open3"
 require "socket"
 require "uri"
 
-module SandboxNet
+module SandboxNetwork
   module_function
 
   PROXY_LISTEN = ["127.0.0.1", 3128].freeze
-  RELAY = File.join(__dir__, "sandbox-net-relay")
-  ALLOW_FILE = File.expand_path("~/.config/sandbox-agent/internet")
+  RELAY = File.join(__dir__, "sandbox-network-relay")
+  ALLOW_FILE = File.expand_path("~/.sandbox-agent/internet-allowlist")
 
   # Loopback names and the reserved dev TLDs stay inside the sandbox: they mean
   # the sandbox's own servers, never something for the proxy to fetch.
@@ -85,7 +85,8 @@ module SandboxNet
     []
   end
 
-  # The allowlist: ~/.config/sandbox-agent/internet plus a project's internet: lines.
+  # The allowlist: ~/.sandbox-agent/internet-allowlist plus a project's
+  # internet: lines.
   #
   #   example.org      the name and every subdomain (*.example.org: the same)
   #   203.0.113.7      an address, for a host with no name
@@ -260,7 +261,7 @@ module SandboxNet
 
       proxy = UNIXServer.new(proxy_socket)
       @servers << proxy
-      SandboxNet.serve(proxy) { |c| SandboxNet.handle_proxy_client(c, to_host, allow, log) }
+      SandboxNetwork.serve(proxy) { |c| SandboxNetwork.handle_proxy_client(c, to_host, allow, log) }
 
       expose.each do |ip, port|
         server = begin
@@ -270,14 +271,14 @@ module SandboxNet
           next
         end
         @servers << server
-        SandboxNet.serve(server) do |client|
+        SandboxNetwork.serve(server) do |client|
           inside = UNIXSocket.new(expose_socket)
           inside.write("#{ip}:#{port}\n")
-          SandboxNet.splice(client, inside)
+          SandboxNetwork.splice(client, inside)
         end
       end
 
-      @config = File.join(dir, "net.json")
+      @config = File.join(dir, "network.json")
       File.write(@config, JSON.generate(proxy_socket: proxy_socket, expose_socket: expose_socket,
                                         proxy_listen: PROXY_LISTEN, to_host: to_host, expose: expose))
       proxy_url = "http://#{PROXY_LISTEN.join(':')}"
@@ -302,9 +303,10 @@ module SandboxNet
   end
 
   # One log per project, kept across sessions: what to read before turning a
-  # host into an allowlist entry. Under ~/.local/state, which sandboxes see
-  # read-only — an agent can read why it was refused, not rewrite the record.
-  LOG_DIR = File.expand_path("~/.local/state/sandbox-agent/net")
+  # host into an allowlist entry. Under ~/.sandbox-agent, which no sandbox
+  # mounts: sandbox-agent binds each sandbox its own log read-only, so an
+  # agent can read why it was refused, not rewrite the record.
+  LOG_DIR = File.expand_path("~/.sandbox-agent/network-log")
 
   def log_path(project_dir)
     hash = Digest::SHA256.hexdigest(project_dir)[0, 8]
@@ -353,12 +355,12 @@ module SandboxNet
     TXT
   end
 
-  # --- Inside the sandbox (sandbox-net-relay) --------------------------------
+  # --- Inside the sandbox (sandbox-network-relay) --------------------------------
 
   def listen_tcp(ip, port)
     TCPServer.new(ip, port)
   rescue SystemCallError => e
-    warn "sandbox-net-relay: cannot listen on #{ip}:#{port}: #{e.message}"
+    warn "sandbox-network-relay: cannot listen on #{ip}:#{port}: #{e.message}"
     nil
   end
 

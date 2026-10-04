@@ -7,7 +7,7 @@
 # one-way by construction — each sandbox reaches only its own herdr server,
 # but every private socket lives on the host (sandbox-agent's mktmpdir), and
 # each launch made from inside tmux records {project, tmux session, socket}
-# in ~/.local/state/sandbox-agent, a directory no sandbox mounts. Nothing
+# in ~/.sandbox-agent/herdr-registry, a directory no sandbox mounts. Nothing
 # here adds a mount or a capability inside any sandbox.
 #
 # Trust boundary: everything a sandboxed herdr server answers is
@@ -28,7 +28,7 @@
 require "json"
 require "open3"
 
-STATE_DIR = ENV["SANDBOX_AGENT_STATE_DIR"] || File.expand_path("~/.local/state/sandbox-agent")
+REGISTRY_DIR = ENV["SANDBOX_AGENT_HERDR_REGISTRY"] || File.expand_path("~/.sandbox-agent/herdr-registry")
 
 # Worst first — and exactly the states herdr plays a notification sound for:
 # blocked fires the needs-attention/request sound, done fires the finished
@@ -70,7 +70,7 @@ end
 # silence — its quiet dot is a positive claim ("asked everyone, nobody needs
 # you"), so it has to be able to tell "nobody" from "one never answered".
 def entries(keep_unreachable: false)
-  Dir.glob(File.join(STATE_DIR, "*.json")).filter_map do |path|
+  Dir.glob(File.join(REGISTRY_DIR, "*.json")).filter_map do |path|
     begin
       entry = JSON.parse(File.read(path))
     rescue StandardError

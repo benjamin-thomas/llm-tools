@@ -1,44 +1,44 @@
 #!/usr/bin/env ruby
-# Run: ruby tests/sandbox_net_test.rb
+# Run: ruby tests/sandbox_network_test.rb
 
 require "minitest/autorun"
 require "json"
 require "tmpdir"
-require_relative "../sandbox-net"
+require_relative "../sandbox-network"
 
 class EndpointsTest < Minitest::Test
   def test_single_address_and_port
-    assert_equal [["127.1.0.2", 5432]], SandboxNet.parse_endpoints("127.1.0.2:5432")
+    assert_equal [["127.1.0.2", 5432]], SandboxNetwork.parse_endpoints("127.1.0.2:5432")
   end
 
   def test_several_ports
     assert_equal [["127.1.0.1", 3000], ["127.1.0.1", 8080]],
-                 SandboxNet.parse_endpoints("127.1.0.1:3000,8080")
+                 SandboxNetwork.parse_endpoints("127.1.0.1:3000,8080")
   end
 
   # A pool of dev IPs, one per worktree: every host address, every port.
   def test_range_skips_network_and_broadcast
-    eps = SandboxNet.parse_endpoints("127.5.0.0/30:80,81")
+    eps = SandboxNetwork.parse_endpoints("127.5.0.0/30:80,81")
     assert_equal [["127.5.0.1", 80], ["127.5.0.1", 81], ["127.5.0.2", 80], ["127.5.0.2", 81]], eps
   end
 
   def test_slash_27_gives_thirty_addresses
-    assert_equal 30, SandboxNet.parse_endpoints("127.5.0.0/27:8000").size
+    assert_equal 30, SandboxNetwork.parse_endpoints("127.5.0.0/27:8000").size
   end
 
   def test_huge_range_is_refused
-    assert_raises(ArgumentError) { SandboxNet.parse_endpoints("127.0.0.0/8:80") }
+    assert_raises(ArgumentError) { SandboxNetwork.parse_endpoints("127.0.0.0/8:80") }
   end
 
   def test_garbage_is_refused
     ["127.1.0.1", "localhost:80", "127.1.0.1:0", "127.1.0.1:70000", "1.2.3:80"].each do |bad|
-      assert_raises(ArgumentError, bad) { SandboxNet.parse_endpoints(bad) }
+      assert_raises(ArgumentError, bad) { SandboxNetwork.parse_endpoints(bad) }
     end
   end
 end
 
 class HostListTest < Minitest::Test
-  def list(text) = SandboxNet::HostList.parse(text)
+  def list(text) = SandboxNetwork::HostList.parse(text)
 
   def test_a_name_covers_itself_and_its_subdomains
     d = list("example.org\n")
@@ -73,10 +73,10 @@ class HostListTest < Minitest::Test
 end
 
 class VerdictTest < Minitest::Test
-  def list(text) = SandboxNet::HostList.parse(text)
+  def list(text) = SandboxNetwork::HostList.parse(text)
 
   def verdict(host, port, addrs, to_host: [], allow: "github.com")
-    SandboxNet.verdict(host, port, addrs, to_host, list(allow))
+    SandboxNetwork.verdict(host, port, addrs, to_host, list(allow))
   end
 
   def test_allowlisted_host_is_allowed
@@ -129,31 +129,31 @@ end
 class NetHostsTest < Minitest::Test
   def test_reads_internet_lines_from_mounts_text
     text = "ro:~/x\ninternet:guides.rubyonrails.org\n  internet: *.example.org  # docs\nhost:127.1.0.2:5432\n# internet:commented.org\n"
-    assert_equal ["guides.rubyonrails.org", "*.example.org"], SandboxNet.internet_hosts(text)
+    assert_equal ["guides.rubyonrails.org", "*.example.org"], SandboxNetwork.internet_hosts(text)
   end
 end
 
 class RequestHeadTest < Minitest::Test
   def test_connect
     assert_equal [:connect, "github.com", 443],
-                 SandboxNet.parse_request_head("CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n")
+                 SandboxNetwork.parse_request_head("CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n")
   end
 
   def test_connect_ipv6
-    assert_equal [:connect, "::1", 443], SandboxNet.parse_request_head("CONNECT [::1]:443 HTTP/1.1\r\n\r\n")
+    assert_equal [:connect, "::1", 443], SandboxNetwork.parse_request_head("CONNECT [::1]:443 HTTP/1.1\r\n\r\n")
   end
 
   def test_plain_http
     assert_equal [:http, "example.org", 80],
-                 SandboxNet.parse_request_head("GET http://example.org/x HTTP/1.1\r\nHost: example.org\r\n\r\n")
+                 SandboxNetwork.parse_request_head("GET http://example.org/x HTTP/1.1\r\nHost: example.org\r\n\r\n")
   end
 
   def test_origin_form_is_not_a_proxy_request
-    assert_nil SandboxNet.parse_request_head("GET /x HTTP/1.1\r\n\r\n")
+    assert_nil SandboxNetwork.parse_request_head("GET /x HTTP/1.1\r\n\r\n")
   end
 
   def test_garbage
-    assert_nil SandboxNet.parse_request_head("hello\r\n\r\n")
+    assert_nil SandboxNetwork.parse_request_head("hello\r\n\r\n")
   end
 end
 
@@ -163,7 +163,7 @@ end
 class PrivateNetworkTest < Minitest::Test
   def setup
     skip "bwrap not installed" unless system("command -v bwrap >/dev/null")
-    @dir = Dir.mktmpdir("sandbox-net-test-")
+    @dir = Dir.mktmpdir("sandbox-network-test-")
     @log = []
   end
 
@@ -184,10 +184,10 @@ class PrivateNetworkTest < Minitest::Test
     server.addr[1]
   end
 
-  # Runs `script` with ruby inside a sandbox wired by SandboxNet.start.
+  # Runs `script` with ruby inside a sandbox wired by SandboxNetwork.start.
   def in_sandbox(script, to_host: [], expose: [])
-    net = SandboxNet.start(@dir, to_host: to_host, expose: expose,
-                                 allow: -> { SandboxNet::HostList.parse("") },
+    net = SandboxNetwork.start(@dir, to_host: to_host, expose: expose,
+                                 allow: -> { SandboxNetwork::HostList.parse("") },
                                  log: ->(*e) { @log << e })
     args = ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
             "--bind", @dir, @dir, "--unshare-net", "--unshare-pid", "--die-with-parent",
@@ -221,8 +221,8 @@ class PrivateNetworkTest < Minitest::Test
   end
 
   def test_node_is_told_to_use_the_proxy
-    net = SandboxNet.start(@dir, to_host: [], expose: [],
-                                 allow: -> { SandboxNet::HostList.parse("") }, log: ->(*) {})
+    net = SandboxNetwork.start(@dir, to_host: [], expose: [],
+                                 allow: -> { SandboxNetwork::HostList.parse("") }, log: ->(*) {})
     assert_equal "1", net.env["NODE_USE_ENV_PROXY"]
   ensure
     net&.stop

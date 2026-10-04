@@ -26,3 +26,15 @@ class ApprovalDiffTest < Minitest::Test
     refute_includes diff("internet:a.org\n", "internet:b.org\n").join, "\e["
   end
 end
+
+# Where approvals live: readable names, so the store can be inspected by hand.
+class ApprovalStoreTest < Minitest::Test
+  def test_project_pointer_is_named_after_the_project
+    pointer = SandboxLib.approval_pointer("/home/me/code/erp-workspace")
+    assert_match %r{/approvals/by-project/erp-workspace-\h{16}\z}, pointer
+  end
+
+  def test_approved_texts_are_kept_by_content
+    assert_match %r{/approvals/by-content/abc123\z}, SandboxLib.approved_copy("abc123")
+  end
+end

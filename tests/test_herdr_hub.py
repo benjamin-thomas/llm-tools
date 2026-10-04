@@ -85,7 +85,7 @@ class HerdrHubTest(unittest.TestCase):
     def run_hub(self, *args: str) -> str:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin}:{env['PATH']}"
-        env["SANDBOX_AGENT_STATE_DIR"] = str(self.state)
+        env["SANDBOX_AGENT_HERDR_REGISTRY"] = str(self.state)
         env["TMUX_STUB_LOG"] = str(self.log)
         out = subprocess.run(
             ["ruby", str(HUB), *args],
