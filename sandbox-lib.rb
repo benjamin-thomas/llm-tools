@@ -1,16 +1,10 @@
 #!/usr/bin/env ruby
 
-# Shared sandbox construction for `sandbox-agent` and `run-orca-server`.
+# Sandbox construction for `sandbox-agent`: what gets mounted, and the
+# .sandbox-mounts contract.
 #
-# The two tools do different jobs — one opens an interactive agent session, the
-# other starts an Orca server — but they grant the same thing, because agents
-# run inside either way. Hence one definition of what gets mounted, one floor,
-# one .sandbox-mounts contract. Two copies would drift, and a drifted mount rule
-# is exactly how the auto-mounted-symlink hole got in.
-#
-# What stays in the callers: the private screen, the clipboard bridge and the
-# multiplexer (interactive only), Orca's userData, port and pairing (server
-# only). X11 itself lives in sandbox-x11.rb.
+# What stays in sandbox-agent: the private screen, the clipboard bridge and the
+# multiplexer. X11 itself lives in sandbox-x11.rb.
 
 require "digest"
 require "fileutils"
@@ -310,7 +304,7 @@ module SandboxLib
   # WHY THERE IS NO DENYLIST HERE, AND WHY YOU SHOULD NOT ADD ONE BACK.
   #
   # This file used to carry a "floor": a list of paths .sandbox-mounts could
-  # never grant (~/.ssh, the keyring, D-Bus, the Orca socket, docker.sock). That
+  # never grant (~/.ssh, the keyring, D-Bus, docker.sock). That
   # was a patch over a deeper flaw.
   #
   # .sandbox-mounts lives INSIDE the project, which the agent can write. An
@@ -426,20 +420,14 @@ module SandboxLib
     exit 1
   end
 
-  # Every bwrap argument the two tools share, in the order bwrap needs — last
-  # mount wins, so the ordering here is load-bearing, not stylistic.
+  # Every bwrap argument, in the order bwrap needs — last mount wins, so the
+  # ordering here is load-bearing, not stylistic.
   #
-  # headless      a server with no one watching: mounts /sys for Chromium. The
-  #               host display is out of reach either way (see sandbox-x11.rb).
-  # extra_mounts  operator-supplied "MODE:SRC[:DEST]" strings. Applied after the
-  #               project's own .sandbox-mounts so they win a conflict, and
-  #               before the floor masks so they cannot defeat them.
   # command  the executable that will run inside, when the caller knows it. Only
   #          used to resolve a symlinked launcher's target (a CLI whose binary
   #          lives beside the state it writes), so nil is fine.
   # path_prepend  dirs put first on the sandbox PATH, ahead of ~/.local/bin.
-  def build_base_args(project_dir, git_rw:, headless:, command: nil, extra_mounts: [], extra_env: [],
-                      path_prepend: [])
+  def build_base_args(project_dir, git_rw:, command: nil, extra_env: [], path_prepend: [])
     # Before anything else: no sandbox may start while the host X server would
     # admit it.
     SandboxX11.close_host_display!
@@ -487,11 +475,6 @@ module SandboxLib
     # mode. An X client can read keystrokes and type into host terminals; see
     # sandbox-x11.rb, and the private screen sandbox-agent provides instead. The
     # tmpfs /tmp leaves a sandbox-local Xvfb free to create its own socket.
-
-    # Chromium reads /sys/devices/system/cpu to size its worker pools. Harmless to
-    # expose (read-only kernel metadata, no secrets) and Electron logs errors on
-    # every start without it.
-    args.push(*ro("/sys")) if headless && File.directory?("/sys")
 
     # IDE connection sockets
     claude_ipc = "/tmp/claude-#{Process.uid}"
@@ -774,33 +757,6 @@ module SandboxLib
       end
     end
 
-    # Operator-supplied --mount, after the project's own so it wins a conflict, and
-    # still before the masks below so the floor wins over both.
-    extra_mounts.each do |spec|
-      mode, src, dest = spec.split(":", 3)
-      abort "Bad --mount (want MODE:SRC or MODE:SRC:DEST): #{spec}" if src.nil? || src.strip.empty?
-
-      src = File.expand_path(src.strip)
-      resolved = begin File.realpath(src) rescue src end
-      abort "--mount source does not exist: #{src}" unless File.exist?(src)
-
-      # A DEST relocates the mount inside the sandbox. The floor is checked against
-      # the host source only — putting a private directory at ~/.config/orca *inside*
-      # is exactly how a sandboxed `orca serve` gets a userData of its own, and has
-      # nothing to do with reaching the host's.
-      dest = dest.nil? || dest.strip.empty? ? src : File.expand_path(dest.strip)
-
-      case mode
-      when "ro" then args.push(*ro(src, dest))
-      when "rw"
-        # Relocated mounts skip the .git split: they are state directories, not
-        # checkouts, and bind_git_metadata! resolves paths on the host side.
-        dest == src ? bind_rw_mount!(args, src, git_writable: git_rw) : args.push(*rw(src, dest))
-      else abort "Bad --mount mode '#{mode}' (want ro or rw): #{spec}"
-      end
-    end
-
-
     # --- no SSH, last word ---
     #
     # No keys and no agent reach the sandbox, so the client binaries are already
@@ -864,59 +820,12 @@ module SandboxLib
   # image, so no ensure hook fires and a caller's temp dir — with a live
   # multiplexer socket in it — is left behind on every launch.
   #
-  # on_line     called with each stdout line, which is passed through unchanged.
-  #             Lets a caller spot a server's startup JSON without parsing a log.
-  # stop_on_int true when Ctrl-C must stop the sandboxed process. Not the default,
-  #             because the sandboxed process is PID 1 in its own namespace and the
-  #             kernel drops default-action signals to PID 1 unless that process
-  #             installed a handler — Electron has not, so SIGINT reaches it and
-  #             does nothing. TERM bwrap instead and let the namespace teardown
-  #             take the child with it. An interactive multiplexer wants the
-  #             opposite: it handles its own keys, so ignore INT here.
-  def spawn_sandbox(args, cleanup_dir: nil, on_line: nil, stop_on_int: false)
+  # INT is ignored here: the multiplexer inside handles its own keys.
+  def spawn_sandbox(args, cleanup_dir: nil)
     status = nil
     begin
-      if on_line
-        reader, writer = IO.pipe
-        # pgroup: true puts bwrap in its own process group, so a terminal's
-        # Ctrl-C does NOT reach it directly. That matters: taking a bare SIGINT,
-        # bwrap goes away without tearing the sandbox down with it, and the
-        # server is left listening and orphaned. Routed through the INT trap
-        # below it gets an orderly TERM instead — the same path `--stop` takes,
-        # which is exactly why --stop worked while Ctrl-C did not.
-        pid = spawn("bwrap", *args, out: writer, pgroup: true)
-        writer.close
-        Thread.new do
-          reader.each_line do |line|
-            print line
-            $stdout.flush
-            on_line.call(line)
-          end
-        end
-      else
-        pid = spawn("bwrap", *args)
-      end
-
-      if stop_on_int
-        # TERM then KILL: TERM alone is not reliably enough, because the
-        # sandboxed process is PID 1 in its namespace and the kernel drops
-        # default-action signals to PID 1 unless that process installed a
-        # handler. Killing bwrap outright tears the namespace down, which takes
-        # everything inside it.
-        trap("INT") do
-          Thread.new do
-            # Say so: the graceful window below is up to 5s of silence, and a
-            # server that looks hung after Ctrl-C reads exactly like one that
-            # ignored it.
-            $stderr.puts "\nStopping..."
-            Process.kill("TERM", pid) rescue nil
-            sleep 5
-            Process.kill("KILL", pid) rescue nil
-          end
-        end
-      else
-        trap("INT", "IGNORE")
-      end
+      pid = spawn("bwrap", *args)
+      trap("INT", "IGNORE")
       trap("TERM") { Process.kill("TERM", pid) rescue nil }
       _, status = Process.waitpid2(pid)
     ensure

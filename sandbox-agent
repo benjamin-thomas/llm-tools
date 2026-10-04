@@ -58,16 +58,16 @@ require "optparse"
 require "shellwords"
 require "tmpdir"
 
-# The mount set, the floor and the .sandbox-mounts contract live in the lib,
-# shared with run-orca-server. What is here is what only an interactive agent
-# session needs: the multiplexer, and the flags that drive it.
+# The mount set and the .sandbox-mounts contract live in the lib. What is here
+# is what only an interactive agent session needs: the multiplexer, and the
+# flags that drive it.
 require_relative "sandbox-lib"
 
 # module_function also defines these as private instance methods, so the
 # multiplexer block below can keep calling ro/rw unqualified.
 include SandboxLib
 
-flags = { mux: "herdr", gui: true, write: false, mounts: [], setenv: [] }
+flags = { mux: "herdr", gui: true, write: false, setenv: [] }
 
 # `doctor` is a subcommand, not a flag: it takes a project dir and no command.
 if (allow = ARGV.first == "allow")
@@ -92,24 +92,11 @@ parser = OptionParser.new do |opts|
   opts.separator "else under $HOME."
   opts.separator ""
 
-  opts.on("--mux MUX", %w[herdr tmux none],
-          "Multiplexer for the sandboxed session: herdr (default), tmux, or",
-          "none (run the command directly — for servers whose stdout you parse)") do |mux|
-    flags[:mux] = mux
-    flags[:mux_explicit] = true
-  end
+  opts.on("--mux MUX", %w[herdr tmux],
+          "Multiplexer for the sandboxed session: herdr (default) or tmux") { |mux| flags[:mux] = mux }
   opts.on("--[no-]gui", "Private Xephyr screen for GUI apps, e.g. Chrome (default: on).",
           "Turn it off for sessions that never open a window") { |gui| flags[:gui] = gui }
   opts.on("--write", "doctor only: append the missing declarations it found") { flags[:write] = true }
-  # --mount/--setenv come from the command line, not from .sandbox-mounts, so
-  # they are the operator speaking rather than the project. That is the whole
-  # reason they exist as flags: a per-instance path (an Orca userData dir, say)
-  # has no business being declared in a file the sandboxed agent can edit. The
-  # floor still applies to --mount — it costs nothing and keeps one rule.
-  opts.on("--mount SPEC", "Extra mount, MODE:SRC or MODE:SRC:DEST (repeatable).",
-          "DEST relocates it inside the sandbox, e.g.",
-          "rw:~/.local/share/sandbox-orca/foo:~/.config/orca",
-          "For operator-supplied paths; projects use .sandbox-mounts") { |spec| flags[:mounts] << spec }
   opts.on("--setenv PAIR", "Extra env var as KEY=VALUE (repeatable)") { |pair| flags[:setenv] << pair }
 
   opts.separator ""
@@ -268,9 +255,7 @@ home = ENV.fetch("HOME")
 args = SandboxLib.build_base_args(
   project_dir,
   git_rw: git_rw,
-  headless: false,          # interactive: someone is watching, no /sys needed
   command: cmd.first,
-  extra_mounts: flags[:mounts],
   extra_env: flags[:setenv],
   path_prepend: [SandboxLib::SHIM_DIR]
 )
@@ -288,13 +273,6 @@ socket_dir = Dir.mktmpdir("sandbox-agent-")
 args.push(*rw(socket_dir))
 
 case flags[:mux]
-when "none"
-  # No multiplexer: run the command as-is so its stdout reaches our caller
-  # unmodified. This exists for long-lived servers whose startup JSON is parsed
-  # by a script — `orca serve --recipe-json` prints one pairing object and keeps
-  # serving, and a mux in the middle would swallow it. There is no host server
-  # to escape to here, so nothing is lost by leaving it out.
-
 when "tmux"
   # tmux never puts its socket directly in TMUX_TMPDIR — it creates a
   # tmux-<uid>/ subdirectory first. Spelling that out here keeps the attach
