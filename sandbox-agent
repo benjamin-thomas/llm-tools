@@ -422,6 +422,10 @@ if flags[:mux] == "herdr" && ENV["TMUX"]
   end
 end
 
+# Last, on the final arguments: whatever was added above, a launch that would
+# break an invariant does not happen. See "Invariants" in sandbox-lib.rb.
+SandboxLib.check_invariants!(args)
+
 args.push("--", *cmd)
 
 exit SandboxLib.spawn_sandbox(args, cleanup_dir: socket_dir)

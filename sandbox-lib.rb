@@ -6,6 +6,32 @@
 # What stays in sandbox-agent: the private screen, the clipboard bridge and the
 # multiplexer. X11 itself lives in sandbox-x11.rb.
 
+# =============================================================================
+# PENDING — known holes, not fixed yet. Agents: when asked to change this file
+# or sandbox-agent, remind the user of these before anything else.
+#
+# 1. Toolchains are writable. Version managers and package caches (rbenv, nvm,
+#    ghcup, bundler, npm/yarn caches, ~/.local/share and the agent binaries
+#    under it) are mounted rw, and the host runs code from them. A sandboxed
+#    agent can plant code there that runs outside the next time the user
+#    invokes ruby, node, claude... on the host. Fix: toolchains ro, libraries
+#    installed per project (vendor/bundle, node_modules).
+#
+# 2. Dev servers may run on the host. Some dev setups start their servers in a
+#    host terminal, from source and node_modules the agent writes: the same
+#    hole as 1, every day. Fix: run everything that executes project code
+#    inside the sandbox, with only databases (docker) left on the host.
+#
+# 3. The network is the host's. No --unshare-net yet: the sandbox reaches
+#    whatever the host reaches, localhost tunnels included, plus abstract unix
+#    sockets (session buses among them). Fix: a private network namespace,
+#    a filtering proxy on the host (log-only first), bridges for declared ports.
+#
+# 1 and 3 have a rule waiting, commented out, in invariant_violations below (2
+# lives in each project's setup, out of reach of a check here). sandbox-agent
+# prints a short yellow warning at every launch until all three are done.
+# =============================================================================
+
 require "digest"
 require "fileutils"
 require "open3"
@@ -417,6 +443,95 @@ module SandboxLib
     warn "  sandbox-agent allow #{project_dir}"
     warn ""
     warn "(#{tool} refuses to start until you do.)"
+    exit 1
+  end
+
+  # --- Invariants ----------------------------------------------------------
+  #
+  # What no launch may grant, whoever asks: this code, a .sandbox-mounts you
+  # approved, or a later edit that "just re-adds one mount" to fix a tool.
+  # Checked on the final bwrap arguments right before every launch, so a
+  # regression stops the sandbox instead of quietly widening it, and tested in
+  # tests/sandbox_invariants_test.rb.
+  #
+  # This is not the denylist the "Mount approval" comment above warns against.
+  # Approval stays the control for what a project may request; this is a short
+  # list of things that are never right, held against the code drifting. Add a
+  # rule only once the lockdown behind it has landed and daily work still runs —
+  # see PENDING at the top of this file for the ones waiting.
+
+  # Granting any of these, or a directory holding one, hands over the host.
+  def forbidden_paths(home, uid)
+    [
+      "#{home}/.ssh",            # keys
+      "#{home}/.gnupg",          # private keys
+      "#{home}/.password-store", # every secret, once the key is unlocked
+      "/run/user/#{uid}/gnupg",  # the host gpg-agent: decrypts with no key file
+      "/run/user/#{uid}/bus",    # session D-Bus: the Secret Service API
+      "/run/user/#{uid}/keyring",
+      "/run/docker.sock",        # root on the host
+      "/var/run/docker.sock",
+    ]
+  end
+
+  FORBIDDEN_ENV = %w[SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS GPG_AGENT_INFO].freeze
+
+  BIND_FLAGS = %w[--bind --ro-bind --dev-bind --bind-try --ro-bind-try --dev-bind-try].freeze
+
+  # Is `path` the forbidden path itself, inside it, or a parent that contains it?
+  def exposes?(path, forbidden)
+    path == forbidden ||
+      path.start_with?(File.join(forbidden, "")) ||
+      forbidden.start_with?(File.join(path, ""))
+  end
+
+  def invariant_violations(args, home:, uid:)
+    violations = []
+    forbidden = forbidden_paths(home, uid)
+
+    args.each_with_index do |arg, i|
+      next unless BIND_FLAGS.include?(arg)
+
+      src = args[i + 1]
+      next if src == "/dev/null" # a mask hides a path, it does not grant it
+
+      # bwrap follows symlinks, so check where the source really lands too.
+      real = begin File.realpath(src) rescue src end
+      forbidden.each do |f|
+        violations << "#{arg} #{src} exposes #{f}" if exposes?(src, f) || exposes?(real, f)
+      end
+    end
+
+    args.each_cons(2) do |flag, name|
+      violations << "--setenv #{name} hands over a host agent" if flag == "--setenv" && FORBIDDEN_ENV.include?(name)
+    end
+    violations << "no --clearenv: the host environment would leak in" unless args.include?("--clearenv")
+
+    # PENDING — switch these on once the matching lockdown has landed:
+    #
+    # violations << "no --unshare-net: the sandbox shares the host network" unless args.include?("--unshare-net")
+    #
+    # writable = args.each_cons(2).select { |flag, _| %w[--bind --dev-bind].include?(flag) }.map(&:last)
+    # %W[#{home}/.rbenv #{home}/.nvm #{home}/.ghcup #{home}/.bundle #{home}/.npm
+    #    #{home}/.yarn #{home}/.cargo #{home}/.local/share].each do |toolchain|
+    #   writable.each do |src|
+    #     violations << "rw #{src}: the host runs code from #{toolchain}" if exposes?(src, toolchain)
+    #   end
+    # end
+
+    violations.uniq
+  end
+
+  def check_invariants!(args, home: ENV.fetch("HOME"), uid: Process.uid)
+    violations = invariant_violations(args, home: home, uid: uid)
+    return if violations.empty?
+
+    warn "sandbox-agent refuses to start: this launch would break a sandbox invariant."
+    warn ""
+    violations.each { |v| warn "  #{v}" }
+    warn ""
+    warn "See \"Invariants\" in sandbox-lib.rb and the \"Deliberately NOT granted\""
+    warn "header in sandbox-agent before changing anything."
     exit 1
   end
 
