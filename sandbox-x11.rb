@@ -356,14 +356,14 @@ module SandboxX11
   # closing its window loses the screen for the rest of the session.
   def watch_screen(screen)
     env = screen_env(screen)
-    normal = {}
+    fit = { normal: {}, size: nil }
     clipboard = { focused: false, carried: nil }
     Thread.new do
       loop do
         sleep 0.5
         break if (Process.waitpid(screen.pid, Process::WNOHANG) rescue true)
 
-        fit_windows(env, normal)
+        fit_windows(env, fit)
         sync_clipboard_on_focus(screen, env, clipboard) if screen.window
       rescue StandardError
         nil
@@ -375,9 +375,13 @@ module SandboxX11
   # the Xephyr window: the screen changes and Chrome stays put, cut off. Keep
   # every normal top-level window filling the screen instead, as a maximizing
   # WM would. Menus and popups are override-redirect and are left alone.
-  def fit_windows(env, normal)
+  def fit_windows(env, fit)
     width, height = root_size(env)
     return unless width
+
+    announce_size(env, width, height) if fit[:size] != [width, height]
+    fit[:size] = [width, height]
+    normal = fit[:normal]
 
     out, = Open3.capture2(env, "xdotool", "search", "--onlyvisible", "--maxdepth", "1", "--name", ".",
                           "getwindowgeometry", "--shell", "%@", err: File::NULL)
@@ -391,6 +395,14 @@ module SandboxX11
       system(env, "xdotool", "windowmove", id, "0", "0", "windowsize", id, width.to_s, height.to_s,
              out: File::NULL, err: File::NULL)
     end
+  end
+
+  # When Xephyr follows its window to a new size, Chrome is not told: it keeps
+  # the screen size it started with and clamps every click to it, so anything
+  # past the old right or bottom edge cannot be clicked. Setting the same size
+  # again through RandR sends the notification Chrome listens for.
+  def announce_size(env, width, height)
+    system(env, "xrandr", "-s", "#{width}x#{height}", out: File::NULL, err: File::NULL)
   end
 
   # `xdotool getdisplaygeometry` goes stale after a resize; xwininfo does not.
