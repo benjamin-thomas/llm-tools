@@ -287,7 +287,9 @@ module SandboxNetwork
                "NO_PROXY" => NO_PROXY, "no_proxy" => NO_PROXY,
                # Node's built-in fetch ignores the variables above unless told
                # otherwise; Node 24 understands this, older ones skip it.
-               "NODE_USE_ENV_PROXY" => "1" }
+               "NODE_USE_ENV_PROXY" => "1",
+               # Yarn 2+ ignores the standard variables and reads only its own.
+               "YARN_HTTP_PROXY" => proxy_url, "YARN_HTTPS_PROXY" => proxy_url }
     end
 
     # The command, started by the relay once its listeners are up.
@@ -334,7 +336,8 @@ module SandboxNetwork
       A tool that ignores them fails with "network unreachable", ENETUNREACH,
       ENOTFOUND or another DNS error: that is this sandbox, not an outage. Look
       for the tool's own proxy setting. Node's built-in fetch follows the proxy
-      from Node 24 on (NODE_USE_ENV_PROXY=1 is set); Node 22 cannot.
+      from Node 24 on (NODE_USE_ENV_PROXY=1 is set); Node 22 cannot. Yarn 2+
+      gets the proxy from YARN_HTTP_PROXY / YARN_HTTPS_PROXY, also set.
 
       The proxy only lets through allowlisted hosts. A refused host gets HTTP
       403, and every request, allowed or refused, is logged with its reason in:

@@ -228,6 +228,15 @@ class PrivateNetworkTest < Minitest::Test
     net&.stop
   end
 
+  def test_yarn_is_told_to_use_the_proxy
+    net = SandboxNetwork.start(@dir, to_host: [], expose: [],
+                                 allow: -> { SandboxNetwork::HostList.parse("") }, log: ->(*) {})
+    assert_equal "http://127.0.0.1:3128", net.env["YARN_HTTP_PROXY"]
+    assert_equal "http://127.0.0.1:3128", net.env["YARN_HTTPS_PROXY"]
+  ensure
+    net&.stop
+  end
+
   def test_no_direct_route_out
     out, _ = in_sandbox(<<~RUBY)
       begin
