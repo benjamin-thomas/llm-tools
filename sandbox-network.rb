@@ -79,6 +79,15 @@ module SandboxNetwork
     raise ArgumentError, "bad address in #{spec.inspect}"
   end
 
+  # The declared doors narrowed to one address: a launch for one of several
+  # worktrees, each on its own dev IP, reaches and exposes its own only. It can
+  # only remove doors the approved file opened, which is why a flag may ask it.
+  def only_ip(endpoints, ip)
+    raise ArgumentError, "want a single IPv4 address, got #{ip.inspect}" unless ip.to_s.match?(/\A\d{1,3}(?:\.\d{1,3}){3}\z/)
+
+    endpoints.select { |addr, _port| addr == ip }
+  end
+
   def resolve(name)
     Addrinfo.getaddrinfo(name, nil, nil, :STREAM).map(&:ip_address).uniq
   rescue SocketError

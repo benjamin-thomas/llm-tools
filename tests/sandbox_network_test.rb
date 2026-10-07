@@ -16,6 +16,21 @@ class EndpointsTest < Minitest::Test
                  SandboxNetwork.parse_endpoints("127.1.0.1:3000,8080")
   end
 
+  # A launch for one worktree keeps its own address out of the declared pool.
+  def test_only_ip_keeps_that_address
+    pool = SandboxNetwork.parse_endpoints("127.5.0.0/29:5432,8000")
+    assert_equal [["127.5.0.3", 5432], ["127.5.0.3", 8000]], SandboxNetwork.only_ip(pool, "127.5.0.3")
+  end
+
+  # It narrows what was approved, never adds to it.
+  def test_only_ip_outside_the_declarations_keeps_nothing
+    assert_empty SandboxNetwork.only_ip(SandboxNetwork.parse_endpoints("127.5.0.0/29:5432"), "127.9.9.9")
+  end
+
+  def test_only_ip_wants_an_address
+    assert_raises(ArgumentError) { SandboxNetwork.only_ip([], "127.5.0.0/29") }
+  end
+
   # A pool of dev IPs, one per worktree: every host address, every port.
   def test_range_skips_network_and_broadcast
     eps = SandboxNetwork.parse_endpoints("127.5.0.0/30:80,81")
