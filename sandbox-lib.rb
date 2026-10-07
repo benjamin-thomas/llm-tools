@@ -22,6 +22,10 @@
 #    hole as 1, every day. Fix: run everything that executes project code
 #    inside the sandbox, with only databases (docker) left on the host.
 #
+# 3. Host daemon sockets are hidden from a list (HOST_DAEMON_DIRS): a daemon
+#    not on it, or one whose socket moves, is reachable from every sandbox.
+#    Fix: find the sockets under each mounted dir at launch, hide them all.
+#
 # 1 has a rule waiting, commented out, in invariant_violations below (2 lives in
 # each project's setup). sandbox-agent prints a short yellow warning at every
 # launch until both are done.
@@ -612,11 +616,30 @@ module SandboxLib
     ]
   end
 
-  # Host daemons that run commands for any client that connects. A read-only
-  # mount does not stop a connect(), so their socket dirs must be hidden, not
-  # just read-only: watchman's sits under ~/.local, and a trigger registered
-  # through it runs the agent's command on the host.
-  def host_daemon_dirs(home) = ["#{home}/.local/state/watchman"]
+  # Host daemons that act for any client that connects. A read-only mount does
+  # not stop a connect(), so their socket dirs must be hidden, not just
+  # read-only: a watchman trigger, a bloop run, a JetBrains or Zed IPC call, the
+  # keyring's control socket would each act on the host for the agent. Found by
+  # listing the sockets under the mounted dirs; a glob for names that vary.
+  HOST_DAEMON_DIRS = %w[
+    .local/state/watchman
+    .local/share/scalacli/bloop
+    .local/share/zed
+    .cache/scalacli/bsp-sockets
+    .cache/JetBrains
+    .cache/keyring-*
+    .cache/biome
+    .cache/pgls
+    .codex/ipc
+    .codex/app-server-daemon
+    .omp/run
+  ].freeze
+
+  def host_daemon_dirs(home)
+    HOST_DAEMON_DIRS.flat_map do |dir|
+      dir.include?("*") ? Dir.glob(File.join(home, dir)) : [File.join(home, dir)]
+    end
+  end
 
   # sandbox-agent's own state, all of it in one directory that no sandbox
   # mounts (bar its own network log, read-only): approvals, the internet
@@ -1113,9 +1136,10 @@ module SandboxLib
     end
     ssh_masks.each { |path| args.push(*mask(path)) if File.exist?(path) }
 
-    # Hidden behind a private tmpfs, which a sandboxed watchman then uses as its
-    # own state dir. Created first: a host daemon started later would otherwise
-    # appear through the ~/.local mount. See host_daemon_dirs.
+    # Hidden behind a private tmpfs, which the same tool in the sandbox then
+    # uses for its own daemon. Created first when its parent is mounted: a host
+    # daemon started later would otherwise appear through that mount. See
+    # HOST_DAEMON_DIRS.
     host_daemon_dirs(home).each do |dir|
       next unless File.directory?(File.dirname(dir))
 

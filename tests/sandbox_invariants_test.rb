@@ -29,6 +29,9 @@ class SandboxInvariantsTest < Minitest::Test
 
   def violations(args) = SandboxLib.invariant_violations(args, home: @home, uid: UID)
 
+  # What a real launch adds over ~/.local and friends: see HOST_DAEMON_DIRS.
+  def hide_daemons = SandboxLib.host_daemon_dirs(@home).flat_map { |dir| ["--tmpfs", dir] }
+
   def test_minimal_args_pass
     assert_empty violations(base)
   end
@@ -129,7 +132,7 @@ class SandboxInvariantsTest < Minitest::Test
   end
 
   def test_unrelated_dirs_may_be_writable
-    assert_empty violations(base + rw("#{@home}/.local/share"))
+    assert_empty violations(base + rw("#{@home}/.local/share") + hide_daemons)
     assert_empty violations(base + rw("#{@home}/.config"))
   end
 
@@ -140,7 +143,7 @@ class SandboxInvariantsTest < Minitest::Test
   end
 
   def test_a_hidden_host_daemon_socket_dir_passes
-    assert_empty violations(base + ro("#{@home}/.local") + ["--tmpfs", "#{@home}/.local/state/watchman"])
+    assert_empty violations(base + ro("#{@home}/.local") + hide_daemons)
   end
 
   def test_violation_names_the_path
