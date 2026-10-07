@@ -82,6 +82,22 @@ class SandboxGitTest < Minitest::Test
     assert_equal "--ro-bind", mode(args, File.join(mine, ".git"))
   end
 
+  # A linked worktree's own metadata dir holds no config, hooks or info of its
+  # own: git reads only its config.worktree there.
+  def test_a_protected_worktree_passes_with_both_of_its_git_dirs
+    mine = add_worktree("mine")
+    own_dir = File.join(@common, "worktrees", "mine")
+    args = ["--clearenv", "--unshare-net", *args_for(mine, writable: true)]
+    assert_empty SandboxLib.invariant_violations(args, home: @root, uid: 1000, git_dirs: [@common, own_dir])
+  end
+
+  def test_a_writable_worktree_config_is_a_violation
+    mine = add_worktree("mine")
+    own_dir = File.join(@common, "worktrees", "mine")
+    args = ["--clearenv", "--unshare-net", *args_for(mine, writable: true), *rw(File.join(own_dir, "config.worktree"))]
+    refute_empty SandboxLib.invariant_violations(args, home: @root, uid: 1000, git_dirs: [@common, own_dir])
+  end
+
   def test_unprotected_writable_git_is_a_violation
     args = ["--clearenv", "--unshare-net", *rw(@main)]
     violations = SandboxLib.invariant_violations(args, home: @root, uid: 1000, git_dirs: [@common])

@@ -698,7 +698,10 @@ module SandboxLib
     end
     # See "Git write access" above.
     (git_dirs + mounted_git_dirs(args)).uniq.each do |git_dir|
-      GIT_HOST_CODE.each do |entry|
+      # A linked worktree's own metadata dir (it names its common dir) has only
+      # config.worktree among these: git reads the rest from the common dir.
+      entries = File.file?(File.join(git_dir, "commondir")) ? ["config.worktree"] : GIT_HOST_CODE
+      entries.each do |entry|
         path = File.join(git_dir, entry)
         flag = effective_bind(args, path)
         violations << "#{path} is writable: the host runs what it names" if %w[--bind --dev-bind --bind-try --dev-bind-try].include?(flag)
