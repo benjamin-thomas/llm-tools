@@ -75,12 +75,26 @@ require_relative "sandbox-network"
 # multiplexer block below can keep calling ro/rw unqualified.
 include SandboxLib
 
-flags = { mux: "herdr", gui: true, write: false, setenv: [] }
+flags = { mux: "herdr", gui: true, write: false, setenv: [], git_write: false, shares: [] }
 
 # `doctor` is a subcommand, not a flag: it takes a project dir and no command.
 if (allow = ARGV.first == "allow")
   ARGV.shift
 end
+# `share-path <project-dir> <name>`: where the host side of a share lives, for
+# the script that writes or reads it. Created, so it can be filled before launch.
+if ARGV.first == "share-path"
+  abort "Usage: sandbox-agent share-path <project-dir> <name>" unless ARGV.size == 3
+  source = begin
+    SandboxLib.share_source(File.expand_path(ARGV[1]), ARGV[2])
+  rescue ArgumentError => e
+    abort e.message
+  end
+  FileUtils.mkdir_p(source, mode: 0o700)
+  puts source
+  exit
+end
+
 if (doctor = ARGV.first == "doctor")
   ARGV.shift
   # `doctor <dir> --write` is the natural order to type, but OptionParser#order!
@@ -106,6 +120,11 @@ parser = OptionParser.new do |opts|
           "With --no-gui, Xvfb provides the clipboard without a window") { |gui| flags[:gui] = gui }
   opts.on("--write", "doctor only: append the missing declarations it found") { flags[:write] = true }
   opts.on("--setenv PAIR", "Extra env var as KEY=VALUE (repeatable)") { |pair| flags[:setenv] << pair }
+  opts.on("--git-write", "Let this session commit, without asking: config, hooks and",
+          "the other worktrees stay read-only (see \"Git write access\" in sandbox-lib.rb)") { flags[:git_write] = true }
+  opts.on("--share NAME:MODE", "Mount the host folder `sandbox-agent share-path <project> NAME`",
+          "at <project>/.sandbox-shares/NAME, MODE ro or rw (repeatable). Gitignore",
+          ".sandbox-shares/. See \"Shares\" in sandbox-lib.rb") { |spec| flags[:shares] << spec }
 
   opts.separator ""
   opts.separator "Subcommands:"
@@ -113,6 +132,10 @@ parser = OptionParser.new do |opts|
   opts.separator "    Approve the project's .sandbox-mounts after reading it. Required"
   opts.separator "    before a first launch, and again after any change to the file —"
   opts.separator "    it lives in the project, so an agent can edit it."
+  opts.separator ""
+  opts.separator "  sandbox-agent share-path <project-dir> <name>"
+  opts.separator "    Print (and create) the host side of a --share, for the script"
+  opts.separator "    that fills or reads it."
   opts.separator ""
   opts.separator "  sandbox-agent doctor <project-dir> [--write]"
   opts.separator "    Report what this project must declare in .sandbox-mounts before it"
@@ -290,18 +313,25 @@ TXT
 warn($stderr.tty? ? "\e[33m#{pending}\e[0m" : pending)
 
 # Asked rather than left to memory: the answer is needed before the sandbox
-# exists, and inside it the mount can no longer be changed. Always asked, never
-# taken from a flag: a flag is something a script (or an agent writing one)
-# can pass on your behalf. Without a terminal there is no one to ask, so .git
-# stays read-only.
+# exists, and inside it the mount can no longer be changed. Without a terminal
+# there is no one to ask, so .git stays read-only.
+#
+# --git-write answers yes for a script that starts sessions nobody watches. A
+# flag is something a script, or an agent writing one, can pass on your behalf:
+# that is acceptable only because writing to .git no longer reaches the host —
+# config, hooks and the other worktrees stay read-only whatever the answer (see
+# "Git write access" in sandbox-lib.rb). Never let this flag grant more than
+# the question does.
 git_rw =
-  if $stdin.tty?
+  if flags[:git_write]
+    true
+  elsif $stdin.tty?
     $stderr.print "Let this session write to .git? [y/N] "
     %w[y yes].include?($stdin.gets.to_s.strip.downcase)
   else
     false
   end
-warn "Starting with .git read-only." unless git_rw
+warn(git_rw ? "Starting with .git writable (config and hooks read-only)." : "Starting with .git read-only.")
 
 home = ENV.fetch("HOME")
 args = SandboxLib.build_base_args(
@@ -310,6 +340,12 @@ args = SandboxLib.build_base_args(
   command: cmd.first,
   extra_env: flags[:setenv]
 )
+
+begin
+  args.concat(SandboxLib.share_args(project_dir, flags[:shares]))
+rescue ArgumentError => e
+  abort e.message
+end
 
 # --- sandboxed multiplexer server ---
 #
@@ -510,7 +546,8 @@ end
 
 # Last, on the final arguments: whatever was added above, a launch that would
 # break an invariant does not happen. See "Invariants" in sandbox-lib.rb.
-SandboxLib.check_invariants!(args)
+git_layout = SandboxLib.git_layout(project_dir)
+SandboxLib.check_invariants!(args, git_dirs: git_layout ? [git_layout[:common_dir], git_layout[:git_dir]].uniq : [])
 
 args.push("--", *cmd)
 

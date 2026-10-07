@@ -144,7 +144,10 @@ module SandboxLib
     args.push(*ro(mount_path))
   end
 
-  def git_metadata_paths(repo_dir)
+  # { git_dir:, common_dir:, git_file: } — git_dir is the worktree's own metadata
+  # (common_dir itself for a main checkout), git_file the `.git` file a linked
+  # worktree points through. nil outside a repository.
+  def git_layout(repo_dir)
     out, _err, status = Open3.capture3(
       "git",
       "-C",
@@ -154,18 +157,68 @@ module SandboxLib
       "--git-dir",
       "--git-common-dir"
     )
-    return [] unless status.success?
+    return nil unless status.success?
 
-    paths = out.lines(chomp: true).reject(&:empty?)
+    git_dir, common_dir = out.lines(chomp: true)
+    return nil unless git_dir && common_dir && File.directory?(git_dir) && File.directory?(common_dir)
+
     git_file = File.join(repo_dir, ".git")
-    paths << git_file if File.exist?(git_file)
-    paths.uniq.select { |path| File.exist?(path) }
+    { git_dir: git_dir, common_dir: common_dir, git_file: File.file?(git_file) ? git_file : nil }
+  end
+
+  # --- Git write access ------------------------------------------------------
+  #
+  # Writing to .git is what lets an agent commit, and nearly all of .git is
+  # history: objects, refs, the index. A few entries are not history but code
+  # the HOST runs, the next time you run git on that repository yourself:
+  #
+  #   config, config.worktree  core.fsmonitor, core.hooksPath, aliases, filter
+  #                            and diff drivers all name commands git executes
+  #   hooks/                   executed on commit, checkout, merge, push…
+  #   info/                    attributes that route files through those drivers
+  #   modules/                 every submodule's own config and hooks
+  #   worktrees/               the other worktrees' metadata, config.worktree
+  #                            included: what runs when you work in them
+  #   the `.git` file          of a linked worktree: point it at a directory the
+  #                            agent wrote, and that directory's config is used
+  #
+  # A writable one of these is a way out of the sandbox for any prompt injection
+  # that reaches the agent, so they are bound read-only over the writable .git,
+  # always, and the invariants below refuse a launch that would leave one
+  # writable. Do not widen this to fix a git command that fails here (git config,
+  # git worktree add, a submodule update): run that one on the host.
+  #
+  # What remains writable can still damage the repository — move or delete a
+  # branch, rewrite history — but no longer reaches the host. Missing entries are
+  # created first, empty, so the agent cannot create them instead.
+  GIT_HOST_CODE = %w[config config.worktree hooks info modules worktrees].freeze
+
+  def protect_git_dir!(args, common_dir, own_dir)
+    %w[hooks info modules worktrees].each { |entry| FileUtils.mkdir_p(File.join(common_dir, entry)) }
+    FileUtils.touch(File.join(common_dir, "config.worktree"))
+    GIT_HOST_CODE.each { |entry| args.push(*ro(File.join(common_dir, entry))) }
+    return if own_dir == common_dir
+
+    # A linked worktree's own metadata (HEAD, index, rebase state) sits under
+    # worktrees/, read-only above: give it back, minus its config.
+    args.push(*rw(own_dir))
+    own_config = File.join(own_dir, "config.worktree")
+    FileUtils.touch(own_config)
+    args.push(*ro(own_config))
   end
 
   def bind_git_metadata!(args, repo_dir, writable:)
-    git_metadata_paths(repo_dir).each do |path|
-      args.push(*(writable ? rw(path) : ro(path)))
+    layout = git_layout(repo_dir)
+    return unless layout
+
+    dirs = [layout[:common_dir], layout[:git_dir]].uniq
+    if writable
+      dirs.each { |dir| args.push(*rw(dir)) }
+      protect_git_dir!(args, layout[:common_dir], layout[:git_dir])
+    else
+      dirs.each { |dir| args.push(*ro(dir)) }
     end
+    args.push(*ro(layout[:git_file])) if layout[:git_file]
   end
 
   # The one way to grant write access to a directory: code writable, git history
@@ -178,6 +231,44 @@ module SandboxLib
     return unless File.exist?(File.join(path, ".git"))
 
     bind_git_metadata!(args, path, writable: git_writable)
+  end
+
+  # --- Shares ----------------------------------------------------------------
+  #
+  # A folder the host and the sandbox both see, for a script driving agents:
+  # logs it writes for the agent to read (ro), requests the agent leaves for it
+  # (rw). This is the one kind of mount a caller may pass on the command line,
+  # because the caller picks only a name, never a path: the host side is always
+  # under SHARE_DIR, one folder per project, which holds nothing else, and the
+  # sandbox side always under <project>/.sandbox-shares/. An arbitrary --mount
+  # would be a grant any script, or an agent writing one, could slip in.
+  #
+  # The host side outlives the sandbox and is agent-writable when rw: a script
+  # reading it must not follow a symlink found there.
+  SHARE_DIR = File.expand_path("~/.sandbox-shares")
+  SHARE_NAME = /\A[a-z][a-z0-9-]{0,39}\z/
+
+  def share_source(project_dir, name, store: SHARE_DIR)
+    raise ArgumentError, "bad share name (lowercase words joined by dashes): #{name}" unless name.match?(SHARE_NAME)
+
+    File.join(store, project_dir.delete_prefix("/").tr("/", "-"), name)
+  end
+
+  # specs: ["NAME:ro", "NAME:rw"…] — returns the bwrap args, both sides created.
+  def share_args(project_dir, specs, store: SHARE_DIR)
+    specs.flat_map do |spec|
+      name, mode = spec.split(":", 2)
+      raise ArgumentError, "bad --share (want NAME:ro or NAME:rw): #{spec}" unless %w[ro rw].include?(mode)
+
+      source = share_source(project_dir, name, store: store)
+      parent = File.join(project_dir, ".sandbox-shares")
+      dest = File.join(parent, name)
+      [parent, dest].each do |path|
+        raise ArgumentError, "#{path} is a symlink: remove it, then start again" if File.symlink?(path)
+      end
+      FileUtils.mkdir_p([source, dest], mode: 0o700)
+      mode == "rw" ? rw(source, dest) : ro(source, dest)
+    end
   end
 
   NETWORK_MODES = %w[internet host expose].freeze
@@ -538,8 +629,46 @@ module SandboxLib
       forbidden.start_with?(File.join(path, ""))
   end
 
-  def invariant_violations(args, home:, uid:)
+  # The flag of the last bind whose destination covers `path`, or nil: in bwrap
+  # the last mount wins, a parent mounted later included.
+  def effective_bind(args, path)
+    flag = nil
+    args.each_with_index do |arg, i|
+      next unless BIND_FLAGS.include?(arg)
+
+      dest = args[i + 2]
+      flag = arg if path == dest || path.start_with?(File.join(dest, ""))
+    end
+    flag
+  end
+
+  # Git directories among the mounts: a mounted .git, or a mounted repository's.
+  def mounted_git_dirs(args)
+    args.each_with_index.filter_map do |arg, i|
+      next unless BIND_FLAGS.include?(arg)
+
+      dest = args[i + 2]
+      if File.file?(File.join(dest, "HEAD")) && File.directory?(File.join(dest, "objects"))
+        dest
+      elsif File.directory?(File.join(dest, ".git"))
+        File.join(dest, ".git")
+      end
+    end
+  end
+
+  def invariant_violations(args, home:, uid:, git_dirs: [], share_store: SHARE_DIR)
     violations = []
+
+    # See "Shares": one share per mount, never a folder holding several.
+    args.each_with_index do |arg, i|
+      next unless BIND_FLAGS.include?(arg)
+
+      src = args[i + 1]
+      next unless exposes?(src, share_store)
+
+      depth = src.delete_prefix(File.join(share_store, "")).split("/").size
+      violations << "#{arg} #{src} exposes more than one share" unless src.start_with?(File.join(share_store, "")) && depth == 2
+    end
     forbidden = forbidden_paths(home, uid)
 
     args.each_with_index do |arg, i|
@@ -567,6 +696,15 @@ module SandboxLib
     args.each_cons(2) do |flag, name|
       violations << "--setenv #{name} hands over a host agent" if flag == "--setenv" && FORBIDDEN_ENV.include?(name)
     end
+    # See "Git write access" above.
+    (git_dirs + mounted_git_dirs(args)).uniq.each do |git_dir|
+      GIT_HOST_CODE.each do |entry|
+        path = File.join(git_dir, entry)
+        flag = effective_bind(args, path)
+        violations << "#{path} is writable: the host runs what it names" if %w[--bind --dev-bind --bind-try --dev-bind-try].include?(flag)
+      end
+    end
+
     violations << "no --clearenv: the host environment would leak in" unless args.include?("--clearenv")
     violations << "no --unshare-net: the sandbox would share the host network" unless args.include?("--unshare-net")
 
@@ -583,8 +721,8 @@ module SandboxLib
     violations.uniq
   end
 
-  def check_invariants!(args, home: ENV.fetch("HOME"), uid: Process.uid)
-    violations = invariant_violations(args, home: home, uid: uid)
+  def check_invariants!(args, home: ENV.fetch("HOME"), uid: Process.uid, git_dirs: [])
+    violations = invariant_violations(args, home: home, uid: uid, git_dirs: git_dirs)
     return if violations.empty?
 
     warn "sandbox-agent refuses to start: this launch would break a sandbox invariant."
@@ -842,7 +980,14 @@ module SandboxLib
     # writes downloads/, installs/, tmp/), add its shims/ to PATH below, and pass
     # ASDF_DATA_DIR through so a non-default location is honoured.
     asdf_dir = ENV["ASDF_DATA_DIR"]&.then { |d| File.expand_path(d) } || "#{home}/.asdf"
-    args.push(*rw(asdf_dir)) if File.directory?(asdf_dir)
+    if File.directory?(asdf_dir)
+      args.push(*rw(asdf_dir))
+      # Older installs are a git clone, and so is every plugin: `asdf update` and
+      # `asdf plugin update` run git there, on the host. See "Git write access".
+      [asdf_dir, *Dir.glob(File.join(asdf_dir, "plugins", "*"))].each do |repo|
+        bind_git_metadata!(args, repo, writable: false) if File.exist?(File.join(repo, ".git"))
+      end
+    end
 
     # Go toolchain + GOPATH, tracking whatever `go` is on the caller's PATH (see
     # detect_go_paths). GOROOT is mounted ro; GOPATH rw (module cache + 'go install'
