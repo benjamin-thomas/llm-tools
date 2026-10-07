@@ -40,10 +40,9 @@
 #   The host X server: /tmp/.X11-unix, the cookie, DISPLAY. Any X client can
 #   read every keystroke, capture the screen, and type into a host terminal
 #   (XTEST) — an escape as complete as an ssh socket. Hiding the socket is not
-#   enough, either: Xorg also listens on an abstract socket that the shared
-#   network namespace leaves reachable, so the sandbox is kept out by the
-#   cookie it lacks, and the GNOME `xhost +SI:localuser` rule that would waive
-#   the cookie is revoked at every launch. See sandbox-x11.rb.
+#   enough, either: Xorg also listens on an abstract socket. Network namespace
+#   isolation blocks that socket; the cookie remains hidden, and the GNOME
+#   `xhost +SI:localuser` rule is revoked at every launch. See sandbox-x11.rb.
 #
 #   What replaces it: a private Xephyr screen per session (Chrome shows up
 #   there, and nothing in it can reach the host's windows), and a bridge for
@@ -104,7 +103,7 @@ parser = OptionParser.new do |opts|
   opts.on("--mux MUX", %w[herdr tmux],
           "Multiplexer for the sandboxed session: herdr (default) or tmux") { |mux| flags[:mux] = mux }
   opts.on("--[no-]gui", "Private Xephyr screen for GUI apps, e.g. Chrome (default: on).",
-          "Turn it off for sessions that never open a window") { |gui| flags[:gui] = gui }
+          "With --no-gui, Xvfb provides the clipboard without a window") { |gui| flags[:gui] = gui }
   opts.on("--write", "doctor only: append the missing declarations it found") { flags[:write] = true }
   opts.on("--setenv PAIR", "Extra env var as KEY=VALUE (repeatable)") { |pair| flags[:setenv] << pair }
 
@@ -131,10 +130,10 @@ parser = OptionParser.new do |opts|
   opts.separator "GUI apps get a private screen instead: one Xephyr window per session,"
   opts.separator "titled after the project, that Chrome and its windows follow on resize."
   opts.separator "It starts minimized on the last workspace; bring it back from the dock."
-  opts.separator "The CLIPBOARD selection (not PRIMARY) is bridged both ways, text and"
-  opts.separator "images: `xclip -selection clipboard` inside talks to your desktop's, so"
-  opts.separator "Ctrl+V of a screenshot works in Claude Code, and the Xephyr window's"
-  opts.separator "clipboard is synced as focus enters and leaves it."
+  opts.separator "CLIPBOARD (not PRIMARY) is relayed both ways, for text and images,"
+  opts.separator "including native clipboard access in Codex and ordinary xclip calls."
+  opts.separator "Data is read on demand, in memory only, with no history or focus requirement;"
+  opts.separator "clearing or replacing the source invalidates the relayed content."
   opts.separator ""
   opts.separator "The agent always runs inside a sandboxed multiplexer server so sub-agent"
   opts.separator "panes stay confined. Ctrl-o is the prefix either way (with tmux,"
@@ -309,8 +308,7 @@ args = SandboxLib.build_base_args(
   project_dir,
   git_rw: git_rw,
   command: cmd.first,
-  extra_env: flags[:setenv],
-  path_prepend: [SandboxLib::SHIM_DIR]
+  extra_env: flags[:setenv]
 )
 
 # --- sandboxed multiplexer server ---
@@ -345,9 +343,13 @@ when "tmux"
     "set", "-g", "default-terminal", "tmux-256color", ";",
     "set", "-g", "extended-keys", "on", ";",
     "set", "-g", "prefix", "C-o", ";",
+    "set", "-s", "copy-command", "xclip -selection clipboard", ";",
     "bind", "C-o", "send-prefix", ";",
     "bind", "-n", "M-left", "prev", ";",
     "bind", "-n", "M-right", "next", ";",
+    "bind", "-T", "copy-mode", "M-w", "send-keys", "-X", "copy-pipe-and-cancel", "xclip -selection clipboard", ";",
+    "bind", "-T", "copy-mode-vi", "y", "send-keys", "-X", "copy-pipe-and-cancel", "xclip -selection clipboard", ";",
+    "bind", "-T", "copy-mode-vi", "Enter", "send-keys", "-X", "copy-pipe-and-cancel", "xclip -selection clipboard", ";",
     "new-session", "-s", "sandbox", ";",
     "send-keys", cmd.shelljoin, "Enter",
   ]
@@ -425,26 +427,21 @@ end
 
 # --- clipboard bridge and private screen ---
 #
-# Both run here on the host, in this process, for as long as the sandbox does:
+# Both run on the host, for as long as the sandbox does:
 # they are what replaces the host X server, which the sandbox never sees (see
-# the header). The bridge socket and the Xephyr cookie live in socket_dir, and
-# only the Xephyr socket itself is bound in.
+# the header). --no-gui uses Xvfb: native clipboard clients still need a private
+# X server. Only that server's socket and cookie go into the sandbox.
 
-clipboard_socket = File.join(socket_dir, "clipboard.sock")
-SandboxX11.serve_clipboard(clipboard_socket)
-args.push("--setenv", "SANDBOX_CLIPBOARD_SOCKET", clipboard_socket)
-
-if flags[:gui]
-  title = "sandbox: #{File.basename(File.dirname(project_dir))}/#{File.basename(project_dir)}"
-  screen = SandboxX11.start_screen(socket_dir, title)
-  if screen
-    at_exit { SandboxX11.stop_screen(screen) }
-    args.push(*ro("/tmp/.X11-unix/X#{screen.display.delete(":")}"),
-              "--setenv", "DISPLAY", screen.display,
-              "--setenv", "XAUTHORITY", screen.auth)
-    SandboxX11.watch_screen(screen)
-  end
-end
+title = "sandbox: #{File.basename(File.dirname(project_dir))}/#{File.basename(project_dir)}"
+screen = SandboxX11.start_screen(socket_dir, title, gui: flags[:gui] && !!ENV["DISPLAY"])
+abort "Cannot launch sandbox without its private X server." unless screen
+at_exit { SandboxX11.stop_screen(screen) }
+args.push(*ro("/tmp/.X11-unix/X#{screen.display.delete(":")}"),
+          "--setenv", "DISPLAY", screen.display,
+          "--setenv", "XAUTHORITY", screen.auth)
+SandboxX11.watch_screen(screen) if screen.window
+clipboard_pid = SandboxX11.start_clipboard(screen)
+at_exit { SandboxX11.stop_clipboard(clipboard_pid) } if clipboard_pid
 
 # --- private network ---
 #

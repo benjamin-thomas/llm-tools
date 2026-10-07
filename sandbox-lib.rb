@@ -37,9 +37,6 @@ require_relative "sandbox-x11"
 module SandboxLib
   module_function
 
-  # Stand-ins put first on the sandbox PATH (the bridged xclip).
-  SHIM_DIR = File.join(__dir__, "sandbox-shims")
-
   def detect_opam_switch
     config = File.expand_path("~/.opam/config")
     return nil unless File.exist?(config)
@@ -605,8 +602,7 @@ module SandboxLib
   # command  the executable that will run inside, when the caller knows it. Only
   #          used to resolve a symlinked launcher's target (a CLI whose binary
   #          lives beside the state it writes), so nil is fine.
-  # path_prepend  dirs put first on the sandbox PATH, ahead of ~/.local/bin.
-  def build_base_args(project_dir, git_rw:, command: nil, extra_env: [], path_prepend: [])
+  def build_base_args(project_dir, git_rw:, command: nil, extra_env: [])
     # Before anything else: no sandbox may start while the host X server would
     # admit it.
     SandboxX11.close_host_display!
@@ -873,8 +869,8 @@ module SandboxLib
 
     # Some host tools are symlinks back into the llm-tools repo, and they must still
     # resolve inside the sandbox: ~/.claude/statusline.rb, which Claude Code runs
-    # there, the herdr-hub / herdr-tray / sandbox-agent entries in ~/.local/bin,
-    # and SHIM_DIR, first on the sandbox PATH. Mount the repo root ro for them.
+    # there, the herdr-hub / herdr-tray / sandbox-agent entries in ~/.local/bin.
+    # Mount the repo root ro for them.
     # Skipped when the project already covers the repo (it is the repo, or a
     # parent of it): the ro bind would land after the project's rw one and win.
     # A project inside the repo is fine — its rw bind comes later and wins.
@@ -963,7 +959,6 @@ module SandboxLib
     lang      = ENV.fetch("LANG", "en_US.UTF-8")
 
     path_dirs = [
-      *path_prepend,
       "#{home}/.local/bin",
       *extra_path_dirs,
       *(nvm_bin ? [nvm_bin] : []),
