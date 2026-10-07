@@ -133,6 +133,16 @@ class SandboxInvariantsTest < Minitest::Test
     assert_empty violations(base + rw("#{@home}/.config"))
   end
 
+  # A read-only mount does not stop a connect(): the host watchman's socket,
+  # under ~/.local, would take triggers that run commands on the host.
+  def test_a_visible_host_daemon_socket_dir_is_refused
+    refute_empty violations(base + ro("#{@home}/.local"))
+  end
+
+  def test_a_hidden_host_daemon_socket_dir_passes
+    assert_empty violations(base + ro("#{@home}/.local") + ["--tmpfs", "#{@home}/.local/state/watchman"])
+  end
+
   def test_violation_names_the_path
     assert_match(/\.gnupg/, violations(base + ro("#{@home}/.gnupg")).join("\n"))
   end

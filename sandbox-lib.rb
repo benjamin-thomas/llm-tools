@@ -612,6 +612,12 @@ module SandboxLib
     ]
   end
 
+  # Host daemons that run commands for any client that connects. A read-only
+  # mount does not stop a connect(), so their socket dirs must be hidden, not
+  # just read-only: watchman's sits under ~/.local, and a trigger registered
+  # through it runs the agent's command on the host.
+  def host_daemon_dirs(home) = ["#{home}/.local/state/watchman"]
+
   # sandbox-agent's own state, all of it in one directory that no sandbox
   # mounts (bar its own network log, read-only): approvals, the internet
   # allowlist, network logs, the herdr-hub registry. Whoever writes there
@@ -631,12 +637,15 @@ module SandboxLib
 
   # The flag of the last bind whose destination covers `path`, or nil: in bwrap
   # the last mount wins, a parent mounted later included.
-  def effective_bind(args, path)
+  def effective_bind(args, path) = effective_mount(args, path, BIND_FLAGS)
+
+  # The same, tmpfs included: what `path` really is inside.
+  def effective_mount(args, path, flags = BIND_FLAGS + ["--tmpfs"])
     flag = nil
     args.each_with_index do |arg, i|
-      next unless BIND_FLAGS.include?(arg)
+      next unless flags.include?(arg)
 
-      dest = args[i + 2]
+      dest = arg == "--tmpfs" ? args[i + 1] : args[i + 2]
       flag = arg if path == dest || path.start_with?(File.join(dest, ""))
     end
     flag
@@ -696,6 +705,11 @@ module SandboxLib
     args.each_cons(2) do |flag, name|
       violations << "--setenv #{name} hands over a host agent" if flag == "--setenv" && FORBIDDEN_ENV.include?(name)
     end
+    host_daemon_dirs(home).each do |dir|
+      flag = effective_mount(args, dir)
+      violations << "#{dir} is reachable (#{flag}): its daemon runs commands on the host" if BIND_FLAGS.include?(flag)
+    end
+
     # See "Git write access" above.
     (git_dirs + mounted_git_dirs(args)).uniq.each do |git_dir|
       # A linked worktree's own metadata dir (it names its common dir) has only
@@ -1098,6 +1112,16 @@ module SandboxLib
       %w[/usr/bin /bin /usr/local/bin].map { |dir| File.join(dir, name) }
     end
     ssh_masks.each { |path| args.push(*mask(path)) if File.exist?(path) }
+
+    # Hidden behind a private tmpfs, which a sandboxed watchman then uses as its
+    # own state dir. Created first: a host daemon started later would otherwise
+    # appear through the ~/.local mount. See host_daemon_dirs.
+    host_daemon_dirs(home).each do |dir|
+      next unless File.directory?(File.dirname(dir))
+
+      FileUtils.mkdir_p(dir)
+      args.push("--tmpfs", dir)
+    end
 
     # A private network: loopback only. The way out is the proxy sandbox-agent
     # runs on the host — see sandbox-network.rb.
