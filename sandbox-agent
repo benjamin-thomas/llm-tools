@@ -122,8 +122,8 @@ parser = OptionParser.new do |opts|
   opts.on("--setenv PAIR", "Extra env var as KEY=VALUE (repeatable)") { |pair| flags[:setenv] << pair }
   opts.on("--git-write", "Let this session commit, without asking: config, hooks and",
           "the other worktrees stay read-only (see \"Git write access\" in sandbox-lib.rb)") { flags[:git_write] = true }
-  opts.on("--only-ip IP", "Keep only this address among the host: and expose: doors",
-          ".sandbox-mounts declares (it narrows them, never adds)") { |ip| flags[:only_ip] = ip }
+  opts.on("--ip IP", "The session's own address: keep only it among the host: and expose:",
+          "doors .sandbox-mounts declares (it narrows them, never adds)") { |ip| flags[:only_ip] = ip }
   opts.on("--share NAME:MODE", "Mount the host folder `sandbox-agent share-path <project> NAME`",
           "at <project>/.sandbox-shares/NAME, MODE ro or rw (repeatable). Gitignore",
           ".sandbox-shares/. See \"Shares\" in sandbox-lib.rb") { |spec| flags[:shares] << spec }
@@ -308,7 +308,7 @@ if flags[:only_ip]
   begin
     net_endpoints.each_key { |mode| net_endpoints[mode] = SandboxNetwork.only_ip(net_endpoints[mode], flags[:only_ip]) }
   rescue ArgumentError => e
-    abort "--only-ip: #{e.message}"
+    abort "--ip: #{e.message}"
   end
 end
 
@@ -518,7 +518,7 @@ File.write(net_info, SandboxNetwork.info_text(
   expose_lines: net_lines.select { |m| m[:mode] == "expose" }.map { |m| m[:line] },
   log_path: net_log
 ))
-File.write(net_info, "\nhost: and expose: doors narrowed to #{flags[:only_ip]} (--only-ip).\n", mode: "a") if flags[:only_ip]
+File.write(net_info, "\nhost: and expose: doors narrowed to #{flags[:only_ip]} (--ip).\n", mode: "a") if flags[:only_ip]
 net.env.each { |key, value| args.push("--setenv", key, value) }
 args.push("--setenv", "SANDBOX_NETWORK_INFO", net_info,
           "--setenv", "SANDBOX_NETWORK_LOG", net_log)
