@@ -1183,7 +1183,6 @@ module SandboxLib
               *(ENV["ASDF_DATA_DIR"] ? ["--setenv", "ASDF_DATA_DIR", ENV["ASDF_DATA_DIR"]] : []),
               *(ENV["GROK_HOME"] ? ["--setenv", "GROK_HOME", ENV["GROK_HOME"]] : []),
               *(ENV["PRIME_AGENT_CODING_AGENT_DIR"] ? ["--setenv", "PRIME_AGENT_CODING_AGENT_DIR", ENV["PRIME_AGENT_CODING_AGENT_DIR"]] : []),
-              *(ENV["GH_TOKEN"] ? ["--setenv", "GH_TOKEN", ENV["GH_TOKEN"]] : []),
               *extra_env.flat_map do |pair|
                 key, value = pair.split("=", 2)
                 abort "Bad --setenv (want KEY=VALUE): #{pair}" if value.nil? || key.empty?
