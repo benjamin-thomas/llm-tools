@@ -104,3 +104,29 @@ to `~/.local/bin/`.
 /usr/bin/ruby tests/agent_catalog_test.rb
 /usr/bin/ruby tests/agent_pick_test.rb
 ```
+
+## Token recap and quota gauges
+
+`token-recap` totals this machine's tokens from the agents' local logs, one
+box per subscription over its current window (Claude's week, Mistral's month,
+Hyper's billing month from the 12th), priced at each provider's API list rate.
+Each box's `used` bar is the provider's own meter (Hyper's is daily, from
+18:00 Paris), with a tick where an even pace would be.
+`quota-gauges` prints just those meters, one line each (`--json` for scripts).
+
+Mistral serves its Vibe budget only to a logged-in browser, so a Chrome
+extension reads it with your session and a native messaging host keeps it in
+`~/.cache/quota-gauges/mistral.json`. The session cookie never leaves Chrome.
+
+Chrome runs that host outside any sandbox, so it never runs from the repo,
+which sandboxed agents can edit. `./quota-gauges install` copies the extension
+and the host to `~/.local/lib/quota-gauges/` and points Chrome at the copy; it
+says which files changed, so read those changes before you run it.
+`sandbox-lib.rb` refuses to mount that directory, or Chrome's
+`NativeMessagingHosts`, writable. Then in `chrome://extensions`, Developer
+mode → Load unpacked → `~/.local/lib/quota-gauges/chrome/` (or reload it after
+a reinstall). It reads the budget within a few seconds, then every minute.
+
+```bash
+python3 -m pytest tests/test_token_recap_*.py tests/test_quota_gauges*.py
+```

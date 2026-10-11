@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "quota-gauges: Mistral budget",
+  "version": "0.1.0",
+  "description": "Reads the Mistral Vibe budget with your own session and hands it to quota-gauges. The cookie never leaves Chrome.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5NGEiFZsNjz6XWepr2Oic/kCgoVG+AyIA8t03i8B6tzOoneSu3UhZUP87LYgmzgukbiRoFwPIA5dYZ0gSwwEgYwGcBsKTtHqyHd3U/IoRDkIYLAVkSG4GkMP/adJfh332XHlkpchGT3jFyi/j5PIawGyUGQwl1BSS29NlSExi6PBzkcvOvlxc7huSM7ctrTYhnP4Rqcpkm3kpmhD1wJjfz1KKlaTElKGNsaV0XNUM3zP7y1in+gWqMg5dJ9cewWWkZUE7oijE58i8x25XgtHqbK6NDqLQtHvos2yPzIeGiay3XjnmysESXAySYlwQ0lLtcowRpzzFePDsDj7eek2IwIDAQAB",
+  "permissions": ["alarms", "nativeMessaging"],
+  "host_permissions": ["https://chat.mistral.ai/*"],
+  "background": { "service_worker": "background.js" }
+}
