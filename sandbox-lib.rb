@@ -647,13 +647,15 @@ module SandboxLib
   # approves their own mounts and hosts, so it is never writable from inside.
   def own_state_paths(home) = ["#{home}/.sandbox-agent"]
 
-  # What Chrome runs on the host, outside any sandbox: the native messaging
-  # hosts it starts for an extension, and the manifests that name them.
-  # Writing either is running code on the host, so neither is ever writable
-  # from inside. quota-gauges installs its host here (quota_gauges/install.py).
+  # What the desktop runs on the host, outside any sandbox: the native
+  # messaging hosts Chrome starts for an extension and the manifests that name
+  # them, and the extensions GNOME Shell runs inside itself. Writing any of
+  # them is running code on the host, so none is ever writable from inside.
+  # quota-gauges installs into each (quota_gauges/install.py).
   def host_run_paths(home) = [
     "#{home}/.local/lib/quota-gauges",
     "#{home}/.config/google-chrome/NativeMessagingHosts",
+    "#{home}/.local/share/gnome-shell/extensions",
   ]
 
   FORBIDDEN_ENV = %w[SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS GPG_AGENT_INFO].freeze
@@ -733,7 +735,7 @@ module SandboxLib
         violations << "#{arg} #{src} makes #{own} writable" if exposes?(src, own)
       end
       host_run_paths(home).each do |run|
-        violations << "#{arg} #{src} makes #{run} writable: Chrome runs what it holds" if exposes?(src, run)
+        violations << "#{arg} #{src} makes #{run} writable: the desktop runs what it holds" if exposes?(src, run)
       end
     end
 

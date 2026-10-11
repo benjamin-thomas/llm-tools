@@ -134,6 +134,14 @@ class SandboxInvariantsTest < Minitest::Test
     refute_empty violations(base + rw("#{@home}/.local/lib"))
   end
 
+  # GNOME Shell runs every extension in ~/.local/share/gnome-shell/extensions
+  # inside itself, with the whole session's rights.
+  def test_what_gnome_shell_runs_is_never_writable
+    refute_empty violations(base + rw("#{@home}/.local/share/gnome-shell/extensions"))
+    refute_empty violations(base + rw("#{@home}/.local/share/gnome-shell"))
+    refute_empty violations(base + rw("#{@home}/.local/share"))
+  end
+
   def test_what_chrome_runs_may_be_read
     assert_empty violations(base + ro("#{@home}/.local/lib/quota-gauges") + hide_daemons)
   end
@@ -148,7 +156,9 @@ class SandboxInvariantsTest < Minitest::Test
   end
 
   def test_unrelated_dirs_may_be_writable
-    assert_empty violations(base + rw("#{@home}/.local/share") + hide_daemons)
+    # A tool's own data dir, not the whole of ~/.local/share: that one holds
+    # GNOME Shell's extensions (see test_what_gnome_shell_runs_is_never_writable).
+    assert_empty violations(base + rw("#{@home}/.local/share/uv") + hide_daemons)
     # A tool's own config dir, not the whole of ~/.config: that one holds
     # NativeMessagingHosts (see test_what_chrome_runs_is_never_writable).
     assert_empty violations(base + rw("#{@home}/.config/cabal"))
