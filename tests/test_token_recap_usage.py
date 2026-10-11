@@ -12,7 +12,7 @@ from unittest import mock
 from zoneinfo import ZoneInfo
 
 from token_recap import anthropic_usage, xai_usage as xai
-from token_recap.anthropic_usage import claude_limits
+from token_recap.anthropic_usage import best_claude_limits, claude_limits
 from token_recap.xai_usage import xai_usage
 
 PARIS = ZoneInfo("Europe/Paris")
@@ -57,6 +57,47 @@ class ClaudeUsageTest(unittest.TestCase):
         self.assertEqual(got.window.end - got.window.start, anthropic_usage._WEEK)
         self.assertIn("live", got.window.label)
 
+    def test_it_reads_the_five_hour_meter_and_its_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=PAYLOAD):
+                got = claude_limits(self._creds(tmp), NOW, cache=self._cache(tmp))
+        assert got is not None and got.session is not None
+        used, resets = got.session
+        self.assertAlmostEqual(used, 0.06)
+        self.assertEqual(resets, datetime(2026, 8, 30, 3, 9, 59, 700136, tzinfo=PARIS))
+
+    def test_an_idle_five_hour_window_reads_as_unused(self) -> None:
+        """No session running: the endpoint names no reset, and nothing is spent."""
+        payload = dict(PAYLOAD)
+        payload["five_hour"] = {"utilization": 0.0, "resets_at": None}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=payload):
+                got = claude_limits(self._creds(tmp), NOW, cache=self._cache(tmp))
+        assert got is not None
+        self.assertEqual(got.session, (0.0, None))
+
+    def test_a_fresh_answer_is_dated_now_and_a_kept_one_when_it_was_taken(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp)
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=PAYLOAD):
+                got = claude_limits(self._creds(tmp), NOW, cache=cache)
+            later = NOW + timedelta(hours=1)
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=None):
+                kept = claude_limits(self._creds(tmp), later, cache=cache)
+        assert got is not None and kept is not None
+        self.assertEqual(got.as_of, NOW)
+        self.assertEqual(kept.as_of, NOW)
+
+    def test_a_kept_answer_whose_week_has_closed_is_no_answer(self) -> None:
+        """Rate-limited for weeks, the cache must not pass off an old week."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = self._cache(tmp)
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=PAYLOAD):
+                claude_limits(self._creds(tmp), NOW, cache=cache)
+            weeks_later = NOW + timedelta(days=20)
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=None):
+                self.assertIsNone(claude_limits(self._creds(tmp), weeks_later, cache=cache))
+
     def test_the_note_carries_the_other_caps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(anthropic_usage, "_fetch", return_value=PAYLOAD):
@@ -93,6 +134,63 @@ class ClaudeUsageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(anthropic_usage, "_fetch", return_value={"five_hour": {}}):
                 self.assertIsNone(claude_limits(self._creds(tmp), NOW, cache=self._cache(tmp)))
+
+
+def statusline_drop(tmp: str, fetched_at: datetime) -> Path:
+    """The file statusline.rb keeps, with a week of 35% that is still open."""
+    path = Path(tmp) / "rate-limits.json"
+    path.write_text(json.dumps({
+        "fetched_at": int(fetched_at.timestamp()),
+        "five_hour": {"used_percentage": 6, "resets_at": int((NOW + timedelta(hours=3)).timestamp())},
+        "seven_day": {"used_percentage": 35, "resets_at": int((NOW + timedelta(days=2)).timestamp())},
+    }))
+    return path
+
+
+class BestClaudeLimitsTest(unittest.TestCase):
+    """The status line's free copy first; the rate-limited endpoint only when it is old."""
+
+    def _creds(self, tmp: str) -> Path:
+        path = Path(tmp) / ".credentials.json"
+        path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "t"}}))
+        return path
+
+    def test_a_fresh_copy_is_used_without_asking_the_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            drop = statusline_drop(tmp, NOW - timedelta(minutes=5))
+            with mock.patch.object(anthropic_usage, "_fetch", side_effect=AssertionError("asked")):
+                got = best_claude_limits(self._creds(tmp), NOW, drop=drop, cache=Path(tmp) / "c.json")
+        assert got is not None
+        self.assertAlmostEqual(got.used, 0.35)
+        self.assertEqual(got.note, "5h 6%")
+        self.assertEqual(got.window.end.utcoffset(), NOW.utcoffset())  # local, not UTC
+
+    def test_an_old_copy_sends_us_to_the_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            drop = statusline_drop(tmp, NOW - timedelta(hours=2))
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=PAYLOAD):
+                got = best_claude_limits(self._creds(tmp), NOW, drop=drop, cache=Path(tmp) / "c.json")
+        assert got is not None
+        self.assertAlmostEqual(got.used, 0.29)  # the endpoint's answer, not the copy's
+
+    def test_an_old_copy_beats_no_answer_and_says_how_old(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            drop = statusline_drop(tmp, NOW - timedelta(hours=2))
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=None):
+                got = best_claude_limits(self._creds(tmp), NOW, drop=drop, cache=Path(tmp) / "c.json")
+        assert got is not None
+        self.assertAlmostEqual(got.used, 0.35)
+        self.assertIn("as of", got.note)
+
+    def test_offline_never_asks_but_still_reads_the_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            drop = statusline_drop(tmp, NOW - timedelta(hours=2))
+            with mock.patch.object(anthropic_usage, "_fetch", side_effect=AssertionError("asked")):
+                got = best_claude_limits(
+                    self._creds(tmp), NOW, offline=True, drop=drop, cache=Path(tmp) / "c.json"
+                )
+        assert got is not None
+        self.assertAlmostEqual(got.used, 0.35)
 
 
 XAI_PAYLOAD: dict[str, Any] = {

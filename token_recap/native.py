@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from token_recap.buckets import MTOK, Rates
+from token_recap.catalogue import catalogue_rates
+
+# (provider, model) -> a published rate, or None when nobody lists one.
+Lookup = Callable[[str, str], Rates | None]
 
 # Anthropic first-party list, platform.claude.com, Aug 2026. (input, output)
 # $/MTok per rate tier. Every Claude cache rate is a fixed multiple of the
@@ -146,13 +152,29 @@ def grok_native_usd(model: str, prompt: int, cached: int, output: int) -> float:
     return grok_rates(model, prompt).cost(uncached, 0, cached, output)
 
 
-def codex_rates(model: str) -> Rates:
+def codex_rates(model: str, lookup: Lookup = catalogue_rates) -> Rates:
+    """Our card, else OpenAI's catalogue entry, else the current default.
+
+    A model newer than the card would otherwise bill at the fallback while
+    its row shows the catalogue's rates, so the total would contradict them.
+    """
     key = model.lower().strip()
-    inp, cread, cwrite, out = _CODEX.get(key, _CODEX[CODEX_FALLBACK])
+    card = _CODEX.get(key)
+    if card is None:
+        listed = lookup("openai", key)
+        if listed is not None:
+            return listed
+        card = _CODEX[CODEX_FALLBACK]
+    inp, cread, cwrite, out = card
     return Rates(model, input=inp, output=out, cache_read=cread, cache_write=cwrite)
 
 
 def codex_native_usd(
-    model: str, uncached: int, cache_write: int, cache_read: int, output: int
+    model: str,
+    uncached: int,
+    cache_write: int,
+    cache_read: int,
+    output: int,
+    lookup: Lookup = catalogue_rates,
 ) -> float:
-    return codex_rates(model).cost(uncached, cache_write, cache_read, output)
+    return codex_rates(model, lookup).cost(uncached, cache_write, cache_read, output)

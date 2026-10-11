@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from zoneinfo import ZoneInfo
 
 from token_recap.buckets import TokenBuckets
 from token_recap.format import (
+    Meter,
+    Palette,
+    meter_bar,
     MIN_BOX,
     Palette,
     ProviderView,
@@ -160,8 +163,7 @@ class BoxWidthTest(unittest.TestCase):
             self._view("short", {"claude-opus-5": 1}),
             self._view("long", {"openrouter/deepseek-ai/DeepSeek-V4-Pro-0813": 1}),
         ]
-        combined = TokenBuckets()
-        text = render_report(self.NOW, False, 1, views, combined, color=False)
+        text = render_report(self.NOW, views, color=False)
         return text.splitlines()
 
     def test_every_box_shares_one_width(self) -> None:
@@ -180,6 +182,121 @@ class BoxWidthTest(unittest.TestCase):
     def test_the_long_name_is_still_whole(self) -> None:
         joined = "\n".join(self._report())
         self.assertIn("openrouter/deepseek-ai/DeepSeek-V4-Pro-0813", joined)
+
+
+class SnapshotTest(unittest.TestCase):
+    """Each provider is measured in the table of its own span and converted,
+    by the lengths of the two spans, into the other one."""
+
+    NOW = datetime(2026, 8, 29, 12, 0, tzinfo=ZoneInfo("Europe/Paris"))
+
+    def _view(
+        self,
+        key: str,
+        usd: float,
+        length: float,
+        used: float | None = None,
+        capacity: str = "exact",
+    ) -> ProviderView:
+        b = TokenBuckets()
+        b.add(model="m", output=1_000, native_usd=usd)
+        start = self.NOW - timedelta(days=1)
+        window = Window("w", start, start + timedelta(days=length))
+        meter = Meter(used, "") if used is not None else None
+        return ProviderView(
+            key=key, title=key, window=window, buckets=b, short=key,
+            meter=meter, capacity=capacity,
+        )
+
+    def _snapshot(self, views: list[ProviderView]) -> str:
+        text = render_report(self.NOW, views, color=False)
+        return text[text.index("Snapshot"):]
+
+    @staticmethod
+    def _row(snap: str, table: str, name: str) -> str:
+        part = snap[snap.index(table):]
+        return next(ln for ln in part.splitlines() if f"  {name} " in ln)
+
+    def test_a_weekly_provider_is_measured_by_the_week(self) -> None:
+        snap = self._snapshot([self._view("Claude", 700.0, length=7)])
+        week = self._row(snap, "per week", "Claude")
+        self.assertIn("$700.00", week)
+        self.assertNotIn("extrapolated", week)
+        month = self._row(snap, "per month", "Claude")
+        self.assertIn("$3,043.75", month)  # 700 × 30.4375 / 7
+        self.assertIn("(extrapolated)", month)
+
+    def test_a_monthly_provider_is_measured_by_the_month(self) -> None:
+        snap = self._snapshot([self._view("Mistral", 31.0, length=31)])
+        self.assertIn("$31.00", self._row(snap, "per month", "Mistral"))
+        self.assertNotIn("extrapolated", self._row(snap, "per month", "Mistral"))
+        week = self._row(snap, "per week", "Mistral")
+        self.assertIn("$7.00", week)
+        self.assertIn("(extrapolated)", week)
+
+    def test_each_table_totals_its_rows(self) -> None:
+        snap = self._snapshot([self._view("Claude", 700.0, length=7), self._view("Mistral", 31.0, length=31)])
+        self.assertIn("$707.00", snap[snap.index("per week"):snap.index("per month")])
+
+    def test_a_tokens_window_decides_the_span(self) -> None:
+        """Hyper's meter is daily, but its tokens run over the billing month."""
+        view = self._view("Hyper", 30.0, length=1)
+        view.tokens_window = Window("m", self.NOW - timedelta(days=10), self.NOW + timedelta(days=20))
+        snap = self._snapshot([view])
+        self.assertNotIn("extrapolated", self._row(snap, "per month", "Hyper"))
+        self.assertIn("$7.00", self._row(snap, "per week", "Hyper"))
+
+    def test_a_full_meter_is_worth_the_spend_over_the_share_used(self) -> None:
+        """$360 for 36% of a 7-day week: a full week is worth $1,000."""
+        snap = self._snapshot([self._view("Claude", 360.0, length=7, used=0.36)])
+        self.assertIn("$1,000.00", self._row(snap, "per week", "Claude"))
+        self.assertIn("$4,348.21", self._row(snap, "per month", "Claude"))  # 1000 × 30.4375/7
+
+    def test_no_meter_or_too_little_of_one_gives_no_maximum(self) -> None:
+        snap = self._snapshot([
+            self._view("Claude", 360.0, length=7, used=0.03),
+            self._view("Codex", 70.0, length=7),
+        ])
+        for name in ("Claude", "Codex"):
+            with self.subTest(name=name):
+                self.assertEqual(self._row(snap, "per week", name).count("$"), 1)
+
+    def test_a_meter_on_another_span_gives_no_maximum(self) -> None:
+        snap = self._snapshot([self._view("Hyper", 30.0, length=30, used=0.65, capacity="none")])
+        self.assertEqual(self._row(snap, "per month", "Hyper").count("$"), 1)
+
+    def test_a_meter_that_sees_more_than_the_logs_gives_a_floor(self) -> None:
+        """Mistral's meter counts Vibe CLI, which the logs never see."""
+        snap = self._snapshot([self._view("Mistral", 10.0, length=31, used=0.20, capacity="floor")])
+        self.assertIn("≥ $50.00", self._row(snap, "per month", "Mistral"))
+
+
+class PaceMarkerTest(unittest.TestCase):
+    """The used bar carries a tick where an even pace would have it."""
+
+    def test_the_tick_sits_at_the_share_of_the_window_gone(self) -> None:
+        text = meter_bar(Meter(0.36, ""), Palette(False), pace=0.74)
+        gauge = text.split()[0]
+        self.assertEqual(len(gauge), 20)
+        self.assertEqual(gauge[14], "│")
+        self.assertEqual(gauge.count("█"), 7)
+        self.assertIn("pace 74%", text)
+
+    def test_the_tick_shows_inside_the_fill_too(self) -> None:
+        gauge = meter_bar(Meter(0.80, ""), Palette(False), pace=0.30).split()[0]
+        self.assertEqual(gauge[6], "┃")
+
+    def test_its_colour_says_whether_there_is_room(self) -> None:
+        green, yellow, red = "\x1b[32m┃", "\x1b[33m┃", "\x1b[31m┃"
+        self.assertIn("\x1b[32m│", meter_bar(Meter(0.36, ""), Palette(True), pace=0.74))
+        self.assertIn(yellow, meter_bar(Meter(0.80, ""), Palette(True), pace=0.74))
+        self.assertIn(red, meter_bar(Meter(0.95, ""), Palette(True), pace=0.74))
+        del green
+
+    def test_no_reading_no_tick(self) -> None:
+        text = meter_bar(Meter(None, "not available"), Palette(False), pace=0.5)
+        self.assertNotIn("│", text)
+        self.assertNotIn("pace", text)
 
 
 if __name__ == "__main__":

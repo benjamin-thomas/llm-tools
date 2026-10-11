@@ -62,6 +62,7 @@ class ModelUsage:
         self.cache_write += other.cache_write
         self.cache_read += other.cache_read
         self.output += other.output
+        self.reasoning += other.reasoning
         self.native_usd += other.native_usd
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from token_recap.buckets import Rates
 from token_recap.native import (
     claude_native_usd,
     codex_native_usd,
@@ -112,9 +113,34 @@ class CodexPerModelTest(unittest.TestCase):
     def test_model_with_no_published_rate_falls_back(self) -> None:
         args = (1_000, 0, 500, 200)
         self.assertAlmostEqual(
-            codex_native_usd("gpt-5.6-sol-spark", *args),
+            codex_native_usd("gpt-5.6-sol-spark", *args, lookup=unlisted),
             codex_native_usd("gpt-5.6-sol", *args),
         )
+
+    def test_model_newer_than_our_card_is_priced_from_the_catalogue(self) -> None:
+        """Not at the fallback: the row's total must match its shown rates."""
+        asked: list[tuple[str, str]] = []
+
+        def lookup(provider: str, model: str) -> Rates | None:
+            asked.append((provider, model))
+            return Rates(model, input=2.0, output=10.0, cache_read=0.2, cache_write=2.5)
+
+        usd = codex_native_usd(
+            "gpt-6-sol", 1_000_000, 1_000_000, 1_000_000, 1_000_000, lookup=lookup
+        )
+        self.assertAlmostEqual(usd, 2.0 + 2.5 + 0.2 + 10.0)
+        self.assertEqual(asked, [("openai", "gpt-6-sol")])
+
+    def test_our_own_card_beats_the_catalogue(self) -> None:
+        def lookup(provider: str, model: str) -> Rates | None:
+            raise AssertionError("a carded model must not be looked up")
+
+        usd = codex_native_usd("gpt-5.5", 0, 0, 0, 1_000_000, lookup=lookup)
+        self.assertAlmostEqual(usd, 30.0)
+
+
+def unlisted(provider: str, model: str) -> Rates | None:
+    return None
 
 
 if __name__ == "__main__":

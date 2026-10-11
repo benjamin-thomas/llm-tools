@@ -45,6 +45,11 @@ OLLAMA_SECTION = "ollama"
 # says whether the flat fee is earning its keep.
 HYPER_SECTION = "hyper"
 
+# Mistral's Le Chat Pro carries a monthly Vibe budget, and this account has
+# no pay-as-you-go, so every call to the "mistral" provider draws on the plan
+# whichever harness placed it. It refills on the 1st at 00:00 UTC.
+MISTRAL_SECTION = "mistral"
+
 # The sections whose rows are named for the provider that served the call
 # rather than the harness that placed it — see harness_label.
 PROVIDER_NAMED = (API_SECTION, FREE_SECTION, OLLAMA_SECTION)
@@ -104,6 +109,7 @@ PI_SECTIONS: dict[str, str] = {
     "ollama": OLLAMA_SECTION,
     "ollama-cloud": OLLAMA_SECTION,
     "hyper": HYPER_SECTION,
+    "mistral": MISTRAL_SECTION,
 }
 OPENCODE_SECTIONS: dict[str, str] = {
     "openai": "codex",
@@ -111,6 +117,7 @@ OPENCODE_SECTIONS: dict[str, str] = {
     "ollama": OLLAMA_SECTION,
     "ollama-cloud": OLLAMA_SECTION,
     "hyper": HYPER_SECTION,
+    "mistral": MISTRAL_SECTION,
 }
 
 

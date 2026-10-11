@@ -6,11 +6,11 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from token_recap.windows import (
+    hyper_billing_window,
     RESETS,
     Window,
     last_weekly_reset,
     next_weekly_reset,
-    widen_weeks,
 )
 
 PARIS = ZoneInfo("Europe/Paris")
@@ -47,34 +47,24 @@ class WeeklyResetTest(unittest.TestCase):
         )
 
 
-class WidenWeeksTest(unittest.TestCase):
-    BASE = Window(
-        "Tue 12:00 local",
-        datetime(2026, 8, 25, 12, 0, tzinfo=PARIS),
-        datetime(2026, 9, 1, 12, 0, tzinfo=PARIS),
-    )
+class HyperBillingMonthTest(unittest.TestCase):
+    """Hyper bills from the 12th; its daily meter cannot compare with a price."""
 
-    def test_one_week_is_the_window_untouched(self) -> None:
-        self.assertIs(widen_weeks(self.BASE, 1), self.BASE)
+    def test_before_the_12th_the_month_began_last_month(self) -> None:
+        got = hyper_billing_window(datetime(2026, 10, 11, 16, 0, tzinfo=PARIS))
+        self.assertEqual(got, (
+            datetime(2026, 9, 12, tzinfo=PARIS),
+            datetime(2026, 10, 12, tzinfo=PARIS),
+        ))
 
-    def test_four_weeks_reaches_back_three_more(self) -> None:
-        got = widen_weeks(self.BASE, 4)
-        self.assertEqual(got.start, datetime(2026, 8, 4, 12, 0, tzinfo=PARIS))
-        self.assertEqual(got.end, self.BASE.end)  # the end never moves
-        self.assertEqual(got.end - got.start, timedelta(weeks=4))
+    def test_from_the_12th_a_new_month_runs(self) -> None:
+        start, end = hyper_billing_window(datetime(2026, 10, 12, 0, 30, tzinfo=PARIS))
+        self.assertEqual(start, datetime(2026, 10, 12, tzinfo=PARIS))
+        self.assertEqual(end, datetime(2026, 11, 12, tzinfo=PARIS))
 
-    def test_the_label_says_how_wide(self) -> None:
-        self.assertEqual(widen_weeks(self.BASE, 4).label, "Tue 12:00 local ×4wk")
-
-    def test_widening_keeps_the_wall_clock_across_a_dst_change(self) -> None:
-        """Paris leaves DST on 25 Oct 2026, so 8 weeks is not 8×168 hours."""
-        base = Window(
-            "Tue 12:00 local",
-            datetime(2026, 11, 3, 12, 0, tzinfo=PARIS),
-            datetime(2026, 11, 10, 12, 0, tzinfo=PARIS),
-        )
-        got = widen_weeks(base, 4)
-        self.assertEqual(got.start, datetime(2026, 10, 13, 12, 0, tzinfo=PARIS))
+    def test_december_runs_into_january(self) -> None:
+        _, end = hyper_billing_window(datetime(2026, 12, 20, tzinfo=PARIS))
+        self.assertEqual(end, datetime(2027, 1, 12, tzinfo=PARIS))
 
 
 if __name__ == "__main__":

@@ -55,6 +55,7 @@ class Palette:
             "free": "2",
             "ollama": "34",
             "hyper": "38;5;213",
+            "mistral": "38;5;202",
         }.get(name, "1")
         return self.wrap(code, text)
 
@@ -286,6 +287,13 @@ class ProviderView:
     source: str = ""  # who reported this section, when the rows no longer say
     prices: bool = True
     short: str = ""  # the summary-table name; the title is often too long
+    # When the tokens are summed over another span than the meter's window —
+    # Hyper's meter is daily, its price monthly — the span they cover.
+    tokens_window: Window | None = None
+    # What a full meter says about the tokens: "exact" when both cover the
+    # same span and the same usage, "floor" when the meter counts usage the
+    # logs never see, "none" when they cover different spans.
+    capacity: str = "exact"
 
     @property
     def summary_name(self) -> str:
@@ -307,9 +315,16 @@ def render_provider(
         f"  {pal.dim(_window_caption(start, end, now))}",
     ]
     if view.meter is not None:
-        body.append(f"  {pal.dim('used   ')} {_meter_bar(view.meter, pal)}")
+        pace = max(0.0, min(1.0, _window_frac(start, end, now)))
+        body.append(f"  {pal.dim('used   ')} {meter_bar(view.meter, pal, pace)}")
     if view.source:
         body.append(f"  {pal.dim(view.source)}")
+    if view.tokens_window is not None:
+        span = view.tokens_window
+        body += [
+            "",
+            f"  {pal.dim('tokens: ' + span.label)}  ·  {span.start:%d %b %H:%M} → {span.end:%d %b %H:%M}",
+        ]
     body += [
         "",
         f"  {pal.bold(compact_count(b.total) + ' tokens')}   {pal.dim(fmt_int(b.calls) + ' calls')}",
@@ -328,70 +343,126 @@ def render_provider(
     return _box(view.title, body, pal, width, accent=view.key)
 
 
-def _meter_bar(meter: Meter, pal: Palette) -> str:
-    """The provider's own reading, or an empty gauge saying it gave none."""
+# How far over an even pace still only earns a yellow tick.
+_PACE_WARN = 0.10
+
+
+def meter_bar(meter: Meter, pal: Palette, pace: float | None = None) -> str:
+    """The provider's own reading, with a tick where an even pace would be.
+
+    The tick is the rule of three made visible: with 74% of the window gone,
+    74% used is right on pace. Green means room to spare, yellow a little
+    over, red well over — at that rate the allowance runs out before the reset.
+    """
     if meter.used is None:
         return f"{pal.dim(bar(0.0, 20))}  {pal.dim(meter.note)}"
+    width = 20
+    used = max(0.0, min(1.0, meter.used))
+    cells = list(bar(used, width))
     caption = f"{meter.used * 100:.0f}%"
+    if pace is None:
+        gauge = pal.cyan("".join(cells))
+    else:
+        at = min(width - 1, int(max(0.0, pace) * width))
+        tick = "┃" if cells[at] == "█" else "│"
+        room = pace - meter.used
+        colour = pal.green if room >= 0 else pal.yellow if room > -_PACE_WARN else pal.red
+        gauge = pal.cyan("".join(cells[:at])) + colour(tick) + pal.cyan("".join(cells[at + 1 :]))
+        caption += f" · pace {pace * 100:.0f}%"
     if meter.note:
         caption += f" · {meter.note}"
-    return f"{pal.cyan(bar(meter.used, 20))}  {pal.dim(caption)}"
+    return f"{gauge}  {pal.dim(caption)}"
 
 
-def render_header(
-    now: datetime, custom: bool, weeks: int, pal: Palette, width: int
-) -> str:
+def render_header(now: datetime, pal: Palette, width: int) -> str:
     stamp = now.strftime("%a %d %b %Y  %H:%M %Z")
-    plain = not custom and weeks == 1
-    if custom:
-        mode = "Custom range on every provider."
-    elif weeks > 1:
-        mode = f"The last {weeks} weeks, to each provider's own reset."
-    else:
-        mode = "Each provider's own weekly window."
-    source = "'logged' is read from the provider; 'local' is an observed clock."
-    priced = "API list $ = what these tokens would cost at the provider's"
-    caveat = "own list rate, per model. Not what you actually paid."
-    body = [f"  {pal.bold(stamp)}", f"  {pal.dim(mode)}"]
-    if plain:
-        body.append(f"  {pal.dim(source)}")
-    body.append(f"  {pal.dim(priced)}")
-    body.append(f"  {pal.dim(caveat)}")
+    body = [
+        f"  {pal.bold(stamp)}",
+        f"  {pal.dim('Each subscription over its current window.')}",
+        f"  {pal.dim('The used bar ticks where an even pace would be.')}",
+        "  " + pal.dim("API list $ = what these tokens would cost at the provider's"),
+        f"  {pal.dim('own list rate, per model. Not what you actually paid.')}",
+    ]
     return _box("Token recap", body, pal, width)
 
 
-def render_summary(
-    views: list[ProviderView],
-    combined: TokenBuckets,
-    pal: Palette,
-    width: int,
-) -> str:
-    header = f"  {'':<8}{'tokens':>8}  {'API list':>12}"
-    rule = pal.dim("  " + "─" * 30)
-    rows = [pal.dim(header), rule]
-    for view in views:
-        rows.append(
-            f"  {view.summary_name:<8}{compact_count(view.buckets.total):>8}  "
-            f"{pal.yellow(f'{fmt_money(view.buckets.native_usd):>12}')}"
-        )
-    rows.append(rule)
-    rows.append(
-        f"  {pal.bold(_pad('total', 8))}"
-        f"{pal.bold(f'{compact_count(combined.total):>8}')}  "
-        f"{pal.yellow(pal.bold(f'{fmt_money(combined.native_usd):>12}'))}"
-    )
-    rows.append("")
-    rows.append(pal.dim("  Local logs, not the subscription meter. Compare token"))
-    rows.append(pal.dim("  totals (or API list $) with the % used in each web UI."))
+# Each provider is measured in the table of its own span and converted into
+# the other by the lengths of the two spans: a plain rule of three.
+_WEEK_DAYS = 7.0
+_MONTH_DAYS = 365.25 / 12
+_TABLES = (("per week", _WEEK_DAYS), ("per month", _MONTH_DAYS))
+# Below this much of a meter, scaling up to 100% amplifies noise.
+_MIN_USED = 0.05
+
+
+def _days(window: Window) -> float:
+    return (window.end.timestamp() - window.start.timestamp()) / 86400
+
+
+def _native_days(view: ProviderView) -> float:
+    """The table a provider is measured in: its tokens' own span."""
+    span = _days(view.tokens_window or view.window)
+    return _WEEK_DAYS if span < (_WEEK_DAYS + _MONTH_DAYS) / 2 else _MONTH_DAYS
+
+
+def _full_meter_usd(view: ProviderView, days: float) -> str:
+    """What the whole allowance is worth at list price, converted to `days`:
+    the spend over the share of the meter it took. Blank when it cannot say."""
+    meter = view.meter
+    if view.capacity == "none" or meter is None or meter.used is None or meter.used < _MIN_USED:
+        return ""
+    length = _days(view.window)
+    if length <= 0:
+        return ""
+    worth = fmt_money(view.buckets.native_usd / meter.used * days / length)
+    return f"≥ {worth}" if view.capacity == "floor" else worth
+
+
+def render_summary(views: list[ProviderView], pal: Palette, width: int) -> str:
+    """Every provider over a week and over a month. Each is measured in the
+    table of its own span, so far into the current window, and converted into
+    the other table by the lengths of the two spans, where it says so."""
+    rows = [pal.dim(f"  {'':<8}{'tokens':>8}  {'API list':>12}  {'at 100%':>12}")]
+    for label, days in _TABLES:
+        rows.append(pal.dim(f"  {label} " + "─" * (29 - len(label))))
+        tokens = usd = 0.0
+        for view in views:
+            span = _days(view.tokens_window or view.window)
+            converted = _native_days(view) != days
+            if converted and span <= 0:
+                rows.append(f"  {view.summary_name:<8}{'-':>8}  {'-':>12}  {'-':>12}")
+                continue
+            factor = days / span if converted else 1.0
+            full = _full_meter_usd(view, days if converted else _days(view.window))
+            tokens += view.buckets.total * factor
+            usd += view.buckets.native_usd * factor
+            row = (
+                f"  {view.summary_name:<8}"
+                + f"{compact_count(round(view.buckets.total * factor)):>8}  "
+                + pal.yellow(f"{fmt_money(view.buckets.native_usd * factor):>12}")
+                + "  "
+                + pal.green(f"{full or '-':>12}")
+            )
+            if converted:
+                row += "   " + pal.dim("(extrapolated)")
+            rows.append(row)
+        if len(views) > 1:
+            rows.append(
+                f"  {pal.bold(_pad('total', 8))}"
+                f"{pal.bold(f'{compact_count(round(tokens)):>8}')}  "
+                f"{pal.yellow(pal.bold(f'{fmt_money(usd):>12}'))}"
+            )
+        rows.append("")
+    rows.append(pal.dim("  Measured so far in each provider's own span; the other span"))
+    rows.append(pal.dim("  is converted by the length of the two (extrapolated)."))
+    rows.append(pal.dim("  at 100% = API list ÷ share of the meter used: a full allowance."))
+    rows.append(pal.dim("  Local logs, not the subscription meter."))
     return _box("Snapshot", rows, pal, width)
 
 
 def render_report(
     now: datetime,
-    custom: bool,
-    weeks: int,
     views: list[ProviderView],
-    combined: TokenBuckets,
     color: bool | None = None,
 ) -> str:
     pal = Palette(color_enabled(color))
@@ -403,11 +474,11 @@ def render_report(
     width = max(
         [MIN_BOX] + [2 + name_cols[id(view)] + _cols(view) + 2 for view in views]
     )
-    chunks = [render_header(now, custom, weeks, pal, width)]
+    chunks = [render_header(now, pal, width)]
     chunks.extend(
         render_provider(view, now, pal, width, name_cols[id(view)]) for view in views
     )
-    chunks.append(render_summary(views, combined, pal, width))
+    chunks.append(render_summary(views, pal, width))
     return "\n".join(chunks) + "\n"
 
 

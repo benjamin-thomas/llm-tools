@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import itertools
 import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from zoneinfo import ZoneInfo
@@ -12,22 +13,26 @@ from zoneinfo import ZoneInfo
 from token_recap.harness import (
     API_SECTION,
     HYPER_SECTION,
+    MISTRAL_SECTION,
     OLLAMA_SECTION,
     OPENCODE_SECTIONS,
     PI_SECTIONS,
     harness_usd,
     section_for,
+    split_free,
 )
+from token_recap.buckets import TokenBuckets
 from token_recap.catalogue import catalogue_rates
 from token_recap.harness import display_rates
 from token_recap.opencode import collect_opencode
 from token_recap.pi import collect_pi
-from token_recap.recap import api_window, recap_text
+from token_recap.recap import api_window, mistral_window, recap_text
 
 PARIS = ZoneInfo("Europe/Paris")
 START = datetime(2026, 8, 21, 12, 0, tzinfo=PARIS)
 END = datetime(2026, 8, 22, 12, 0, tzinfo=PARIS)
 SPANS = {"codex": (START, END), "grok": (START, END), API_SECTION: (START, END)}
+ROW_IDS = itertools.count()
 
 
 def message(
@@ -87,6 +92,11 @@ class SectionTest(unittest.TestCase):
                 self.assertEqual(
                     section_for(provider, sections), OLLAMA_SECTION, provider
                 )
+
+    def test_mistral_is_the_vibe_subscription(self) -> None:
+        """No pay-as-you-go on this account: every Mistral call is the plan."""
+        for sections in (PI_SECTIONS, OPENCODE_SECTIONS):
+            self.assertEqual(section_for("mistral", sections), MISTRAL_SECTION)
 
     def test_hyper_is_its_own_subscription_too(self) -> None:
         """A flat fee, so its calls neither cost money nor priced to nothing."""
@@ -197,23 +207,39 @@ class HyperReportTest(unittest.TestCase):
     NOW = datetime(2026, 8, 29, 22, 0, tzinfo=PARIS)
 
     @staticmethod
-    def _row(provider: str) -> tuple[str, int, str]:
+    def _row(
+        provider: str,
+        tokens: dict[str, object] | None = None,
+        created: datetime | None = None,
+    ) -> tuple[str, int, str]:
         data = {
             "role": "assistant",
             "providerID": provider,
             "modelID": "glm-5.3-flash",
             "cost": 0.0017,
-            "tokens": {
+            "tokens": tokens
+            or {
                 "input": 10_000,
                 "output": 100,
                 "reasoning": 20,
                 "cache": {"read": 5_000, "write": 0},
             },
         }
-        when = HyperReportTest.NOW - timedelta(days=1)
+        # Inside the current Hyper day, which began at 18:00.
+        when = created or HyperReportTest.NOW - timedelta(hours=1)
         return ("m1", int(when.timestamp() * 1000), json.dumps(data))
 
-    def _report(self, provider: str) -> str:
+    def _report(
+        self,
+        provider: str,
+        tokens: dict[str, object] | None = None,
+        *,
+        balance: float | None = None,
+        mistral: dict[str, object] | None = None,
+        created: datetime | None = None,
+    ) -> str:
+        """A one-row report. `balance` stands in for Hyper's live answer and
+        `mistral` for the Chrome extension's reading."""
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "opencode.db"
             con = sqlite3.connect(db)
@@ -221,14 +247,12 @@ class HyperReportTest(unittest.TestCase):
                 "CREATE TABLE message (id text PRIMARY KEY,"
                 " time_created integer NOT NULL, data text NOT NULL)"
             )
-            con.execute("INSERT INTO message VALUES (?, ?, ?)", self._row(provider))
+            con.execute("INSERT INTO message VALUES (?, ?, ?)", self._row(provider, tokens, created))
             con.commit()
             con.close()
             gone = Path(tmp) / "nothing-here"
             return recap_text(
                 self.NOW,
-                None,
-                None,
                 gone,  # claude root
                 gone,  # claude credentials
                 gone,  # grok log
@@ -237,8 +261,58 @@ class HyperReportTest(unittest.TestCase):
                 gone,  # pi root
                 db,
                 color=False,
-                offline=True,
+                offline=balance is None,
+                hyper_auth=self._hyper_auth(tmp),
+                mistral_reading=self._mistral_reading(tmp, mistral),
+                hyper_balance=lambda key: balance,
             )
+
+    @staticmethod
+    def _hyper_auth(tmp: str) -> Path:
+        path = Path(tmp) / "auth.json"
+        path.write_text(json.dumps({"hyper": {"type": "api", "key": "k"}}))
+        return path
+
+    @staticmethod
+    def _mistral_reading(tmp: str, reading: dict[str, object] | None) -> Path:
+        path = Path(tmp) / "mistral.json"
+        if reading is not None:
+            path.write_text(json.dumps(reading))
+        return path
+
+    def test_the_hyper_card_reads_the_daily_allowance(self) -> None:
+        card = "\n".join(self._card(self._report("hyper", balance=88), "Charm Hyper"))
+        self.assertIn("65% · pace 17%", card)  # 162 of 250 spent, 4h of 24 gone
+        self.assertIn("88 left of 250", card)
+
+    def test_the_hyper_card_says_its_tokens_are_this_machine_only(self) -> None:
+        """The allowance is shared with another device; the logs are not."""
+        card = "\n".join(self._card(self._report("hyper", balance=88), "Charm Hyper"))
+        self.assertIn("shared account", card)
+
+    def test_offline_the_hyper_card_says_its_meter_was_not_asked(self) -> None:
+        card = "\n".join(self._card(self._report("hyper"), "Charm Hyper"))
+        self.assertIn("used", card)
+        self.assertIn("--offline", card)
+
+    def test_the_mistral_card_reads_the_extension_reading(self) -> None:
+        reading = {
+            "fetched_at": "2026-08-29T19:55:00Z",
+            "budget": {"usage_percentage": 20.0, "initial_budget": 255, "currency": "EUR",
+                       "reset_at": "2026-09-01T00:00:00Z"},
+        }
+        card = "\n".join(self._card(self._report("mistral", mistral=reading), "Mistral"))
+        self.assertIn("20% · pace 93%", card)
+        self.assertIn("51.00 € of 255 €", card)
+
+    def test_the_mistral_card_shows_an_extension_error(self) -> None:
+        reading = {"error": "HTTP 401", "error_at": "2026-08-29T19:55:00Z"}
+        card = "\n".join(self._card(self._report("mistral", mistral=reading), "Mistral"))
+        self.assertIn("HTTP 401", card)
+
+    def test_without_a_reading_the_mistral_card_points_at_the_extension(self) -> None:
+        card = "\n".join(self._card(self._report("mistral"), "Mistral"))
+        self.assertIn("Chrome extension", card)
 
     @staticmethod
     def _card(report: str, title: str) -> list[str]:
@@ -253,14 +327,54 @@ class HyperReportTest(unittest.TestCase):
         self.assertIn("glm-5.3-flash (opencode)", "\n".join(card))
         self.assertIn("Hyper", report)  # and a row of its own in the snapshot
 
+    def test_the_meter_covers_the_hyper_day(self) -> None:
+        """The allowance refills at 18:00 Paris, so the gauge runs from the last one."""
+        card = self._card(self._report("hyper"), "Charm Hyper")
+        self.assertIn("29 Aug 18:00 → 30 Aug 18:00", card[1])
+
+    def test_the_tokens_cover_the_billing_month(self) -> None:
+        """A day of tokens cannot be set against a monthly price; a month can."""
+        card = "\n".join(self._card(self._report("hyper"), "Charm Hyper"))
+        self.assertIn("tokens: billing month from the 12th", card)
+        self.assertIn("12 Aug 00:00 → 12 Sep 00:00", card)
+
+    def test_tokens_from_earlier_in_the_billing_month_are_counted(self) -> None:
+        early = datetime(2026, 8, 15, 10, 0, tzinfo=PARIS)
+        card = "\n".join(self._card(self._report("hyper", created=early), "Charm Hyper"))
+        self.assertIn("15,100 tokens", card)
+
     def test_the_card_keeps_its_price_columns(self) -> None:
         """Hyper publishes a rate card, so the list price still means something."""
         card = self._card(self._report("hyper"), "Charm Hyper")
         header = next(ln for ln in card if "model" in ln and "calls" in ln)
         self.assertIn("$in/M", header)
 
+    def test_mistral_work_draws_a_mistral_card_named_by_harness(self) -> None:
+        report = self._report("mistral")
+        card = "\n".join(self._card(report, "Mistral"))
+        self.assertIn("glm-5.3-flash (opencode)", card)
+        self.assertNotIn("┌─ Pay per token ", report)
+
+    def test_the_mistral_card_says_vibe_is_missing_from_it(self) -> None:
+        """The box is not the whole bill: Vibe CLI's own calls leave no record."""
+        card = "\n".join(self._card(self._report("mistral"), "Mistral"))
+        self.assertIn("Vibe CLI: no usage data available", card)
+
     def test_work_elsewhere_draws_no_hyper_card(self) -> None:
         self.assertNotIn("Charm Hyper", self._report("openrouter"))
+
+    def test_a_provider_with_no_tokens_draws_no_card(self) -> None:
+        """A dropped subscription leaves the report once its window is empty."""
+        report = self._report("hyper")
+        for title in ("Claude Code", "Grok", "Codex", "Ollama"):
+            with self.subTest(title=title):
+                self.assertNotIn(f"┌─ {title} ", report)
+        snapshot = self._card(report, "Snapshot")
+        self.assertFalse(any(ln.startswith("│  Grok ") for ln in snapshot))
+
+    def test_calls_that_spent_no_tokens_draw_no_card(self) -> None:
+        """An aborted call is a call, but it is not usage worth a box."""
+        self.assertNotIn("┌─ Ollama ", self._report("ollama", tokens={"input": 0, "output": 0}))
 
 
 class CatalogueTest(unittest.TestCase):
@@ -340,26 +454,43 @@ class HarnessPricingTest(unittest.TestCase):
         self.assertAlmostEqual(neither, 6.25)
 
 
+class SplitFreeTest(unittest.TestCase):
+    def test_reasoning_survives_the_split(self) -> None:
+        buckets = TokenBuckets()
+        buckets.add(output=10, reasoning=4, native_usd=1.0, model="paid")
+        buckets.add(output=10, reasoning=4, native_usd=1.0, model="paid")
+        buckets.add(output=10, reasoning=3, model="free")
+        paid, free = split_free(buckets)
+        self.assertEqual(paid.models["paid"].reasoning, 8)
+        self.assertEqual(paid.reasoning, 8)
+        self.assertEqual(free.reasoning, 3)
+
+
 class ApiWindowTest(unittest.TestCase):
-    NOW = datetime(2026, 8, 29, 22, 0, tzinfo=PARIS)
+    def test_pay_per_token_work_is_the_last_seven_days(self) -> None:
+        """No plan, so no reset to answer to: a plain rolling week."""
+        now = datetime(2026, 8, 29, 22, 0, tzinfo=PARIS)
+        got = api_window(now)
+        self.assertEqual((got.start, got.end), (now - timedelta(days=7), now))
 
-    def test_it_rolls_back_from_now_by_the_week_count(self) -> None:
-        got = api_window(self.NOW, None, None, 4)
-        self.assertEqual(got.end, self.NOW)
-        self.assertEqual(got.start, datetime(2026, 8, 1, 22, 0, tzinfo=PARIS))
 
-    def test_an_explicit_range_governs_it_like_every_other_section(self) -> None:
-        since = datetime(2026, 8, 28, 0, 0, tzinfo=PARIS)
-        got = api_window(self.NOW, since, None, 1)
-        self.assertEqual(got.label, "custom window")
-        self.assertEqual(got.start, since)
-        self.assertEqual(got.end, self.NOW)
+class MistralWindowTest(unittest.TestCase):
+    """The Vibe budget refills on the 1st at 00:00 UTC, so the box does too."""
 
-    def test_an_until_alone_still_narrows_it(self) -> None:
-        until = datetime(2026, 8, 29, 12, 0, tzinfo=PARIS)
-        got = api_window(self.NOW, None, until, 1)
-        self.assertEqual(got.end, until)
-        self.assertEqual(got.start, datetime(2026, 8, 22, 22, 0, tzinfo=PARIS))
+    UTC = timezone.utc
+
+    def test_it_is_the_calendar_month_in_utc(self) -> None:
+        got = mistral_window(datetime(2026, 8, 29, 22, 0, tzinfo=PARIS))
+        self.assertEqual(got.start, datetime(2026, 8, 1, tzinfo=self.UTC))
+        self.assertEqual(got.end, datetime(2026, 9, 1, tzinfo=self.UTC))
+
+    def test_paris_midnight_on_the_first_is_still_last_month(self) -> None:
+        got = mistral_window(datetime(2026, 9, 1, 1, 30, tzinfo=PARIS))
+        self.assertEqual(got.start, datetime(2026, 8, 1, tzinfo=self.UTC))
+
+    def test_december_rolls_into_january(self) -> None:
+        got = mistral_window(datetime(2026, 12, 15, tzinfo=PARIS))
+        self.assertEqual(got.end, datetime(2027, 1, 1, tzinfo=self.UTC))
 
 
 class PiCollectorTest(unittest.TestCase):
@@ -471,7 +602,9 @@ class OpencodeCollectorTest(unittest.TestCase):
             "cost": cost,
             "tokens": tokens,
         }
-        return (f"msg{id(tokens)}", int(created.timestamp() * 1000), json.dumps(data))
+        # Not id(tokens): the dict dies on return, so the next row's dict can
+        # reuse its address and collide on the primary key.
+        return (f"msg{next(ROW_IDS)}", int(created.timestamp() * 1000), json.dumps(data))
 
     def _collect(self, rows: list[tuple[str, int, str]]):
         with tempfile.TemporaryDirectory() as tmp:

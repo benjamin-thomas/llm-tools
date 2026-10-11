@@ -10,9 +10,10 @@ clock and says the meter is unavailable.
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,17 @@ _WEEK = timedelta(days=7)
 CACHE = Path.home() / ".cache" / "token-recap" / "claude-usage.json"
 _FRESH = 120.0
 
+# Claude Code hands its status line the same two meters on every repaint, and
+# statusline.rb keeps them here, stamped with the API response they came with.
+# Reading that costs nothing, so the endpoint is asked only once it is old —
+# no session has talked to the API lately.
+STATUSLINE_DROP = (
+    Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    / "claude-statusline"
+    / "rate-limits.json"
+)
+_STATUSLINE_MAX_AGE = timedelta(minutes=30)
+
 
 @dataclass(frozen=True)
 class ClaudeLimits:
@@ -38,6 +50,9 @@ class ClaudeLimits:
     used: float  # 0..1 of the weekly allowance
     note: str
     fresh: bool = True
+    # The 5h bucket: used 0..1, and its reset — None while no session runs.
+    session: tuple[float, datetime | None] | None = None
+    as_of: datetime | None = None  # when the endpoint gave this answer
 
 
 def claude_limits(
@@ -55,12 +70,100 @@ def claude_limits(
         return None
     used, resets = weekly
     end = resets.astimezone(now.tzinfo)
+    if end <= now:
+        return None  # a kept answer from a week that has since closed
     window = Window(f"{end:%a %H:%M} live", end - _WEEK, end)
     note = _note(payload)
-    if not fresh and taken_at is not None:
-        seen = datetime.fromtimestamp(taken_at, tz=timezone.utc).astimezone(now.tzinfo)
+    seen = (
+        now
+        if taken_at is None
+        else datetime.fromtimestamp(taken_at, tz=timezone.utc).astimezone(now.tzinfo)
+    )
+    if not fresh:
         note = f"{note} · as of {seen:%d %b %H:%M}" if note else f"as of {seen:%d %b %H:%M}"
-    return ClaudeLimits(window, used / 100.0, note, fresh)
+    return ClaudeLimits(
+        window, used / 100.0, note, fresh, _session(payload, now), seen
+    )
+
+
+def _session(
+    payload: dict[str, Any], now: datetime
+) -> tuple[float, datetime | None] | None:
+    block = payload.get("five_hour")
+    if not isinstance(block, dict):
+        return None
+    used = _percent(block.get("utilization"))
+    if used is None:
+        return None
+    resets = parse_iso(str(block.get("resets_at") or ""))
+    return used / 100.0, resets.astimezone(now.tzinfo) if resets else None
+
+
+def best_claude_limits(
+    credentials: Path,
+    now: datetime,
+    offline: bool = False,
+    drop: Path = STATUSLINE_DROP,
+    cache: Path = CACHE,
+) -> ClaudeLimits | None:
+    """The status line's copy while it is fresh, else the endpoint, else the
+    copy however old — an old reading still beats none, and says its age."""
+    blob = _read_json(drop)
+    copied = limits_from_statusline(blob, now) if blob else None
+    if copied is not None and copied.as_of and now - copied.as_of <= _STATUSLINE_MAX_AGE:
+        return copied
+    live = None if offline else claude_limits(credentials, now, cache=cache)
+    if live is not None or copied is None:
+        return live
+    seen = f"as of {copied.as_of:%d %b %H:%M}" if copied.as_of else "as of ?"
+    note = f"{copied.note} · {seen}" if copied.note else seen
+    return replace(copied, note=note, fresh=False)
+
+
+def limits_from_statusline(blob: dict[str, Any], now: datetime) -> ClaudeLimits | None:
+    """Claude's meters as Claude Code last handed them to its status line.
+
+    Free to read, unlike the usage endpoint, which rate-limits hard. Its only
+    weakness is age: it is as fresh as the last API response of any session.
+    """
+    taken_at = blob.get("fetched_at")
+    if not isinstance(taken_at, (int, float)):
+        return None
+    weekly = _statusline_window(blob.get("seven_day"))
+    if weekly is None:
+        return None
+    used, end = weekly
+    end = end.astimezone(now.tzinfo)  # shown in local time, like the endpoint's
+    if end <= now:
+        return None  # that week has closed: its reading says nothing now
+    session = _statusline_window(blob.get("five_hour"))
+    if session is not None and session[1] <= now:
+        session = (0.0, None)  # the 5h window lapsed: nothing spent in a new one
+    return ClaudeLimits(
+        Window(f"{end:%a %H:%M} live", end - _WEEK, end),
+        used,
+        f"5h {session[0] * 100:.0f}%" if session else "",
+        session=(session[0], session[1]) if session else None,
+        as_of=datetime.fromtimestamp(taken_at, tz=timezone.utc).astimezone(now.tzinfo),
+    )
+
+
+def _statusline_window(block: Any) -> tuple[float, datetime] | None:
+    if not isinstance(block, dict):
+        return None
+    used = block.get("used_percentage")
+    resets = block.get("resets_at")
+    if not isinstance(used, (int, float)) or not isinstance(resets, (int, float)):
+        return None
+    return used / 100.0, datetime.fromtimestamp(resets, tz=timezone.utc)
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        blob: Any = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return blob if isinstance(blob, dict) else None
 
 
 def _weekly(payload: dict[str, Any]) -> tuple[float, datetime] | None:
