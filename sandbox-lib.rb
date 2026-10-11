@@ -936,7 +936,7 @@ module SandboxLib
     # bootstraps for its IPython tool. ~/.prime/supervisor-owners sits one level up
     # (the daemon ownership registry), so bind the whole tree rw rather than just
     # the agent dir. PRIME_AGENT_CODING_AGENT_DIR relocates the agent dir; honour it
-    # like GROK_HOME/ASDF_DATA_DIR are honoured, and pass it through below.
+    # like ASDF_DATA_DIR is honoured, and pass it through below.
     prime_dir = "#{home}/.prime"
     args.push(*rw(prime_dir)) if File.directory?(prime_dir)
     prime_agent_dir = ENV["PRIME_AGENT_CODING_AGENT_DIR"]&.then { |d| File.expand_path(d) }
@@ -973,12 +973,12 @@ module SandboxLib
       args.push("--tmpfs", "#{prime_dir}/#{sub}")
     end
 
-    # grok (xAI): everything lives under one dir (GROK_HOME, default ~/.grok) — the
-    # binary itself (~/.local/bin/grok symlinks into downloads/), config.toml,
-    # auth.json, plus lock files, sessions, logs and worktrees.db written at
-    # runtime. Mount rw. Its bin/ goes on PATH below so `grok` resolves even when
-    # the ~/.local/bin symlink is absent.
-    grok_dir = ENV["GROK_HOME"]&.then { |d| File.expand_path(d) } || "#{home}/.grok"
+    # grok (xAI): everything lives under one dir, ~/.grok — the binary itself
+    # (~/.local/bin/grok symlinks into downloads/), config.toml, auth.json,
+    # plus lock files, sessions, logs and worktrees.db written at runtime.
+    # Mount rw. Its bin/ goes on PATH below so `grok` resolves even when the
+    # ~/.local/bin symlink is absent.
+    grok_dir = "#{home}/.grok"
     args.push(*rw(grok_dir)) if File.directory?(grok_dir)
 
     # vibe (Mistral): config.toml, history, logs, sessions and caches all live
@@ -1190,7 +1190,6 @@ module SandboxLib
               *(ENV["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] ? ["--setenv", "CLAUDE_CODE_DISABLE_AUTO_MEMORY", ENV["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]] : []),
               *(ENV["XDG_RUNTIME_DIR"] ? ["--setenv", "XDG_RUNTIME_DIR", ENV["XDG_RUNTIME_DIR"]] : []),
               *(ENV["ASDF_DATA_DIR"] ? ["--setenv", "ASDF_DATA_DIR", ENV["ASDF_DATA_DIR"]] : []),
-              *(ENV["GROK_HOME"] ? ["--setenv", "GROK_HOME", ENV["GROK_HOME"]] : []),
               *(ENV["PRIME_AGENT_CODING_AGENT_DIR"] ? ["--setenv", "PRIME_AGENT_CODING_AGENT_DIR", ENV["PRIME_AGENT_CODING_AGENT_DIR"]] : []),
               *extra_env.flat_map do |pair|
                 key, value = pair.split("=", 2)
