@@ -122,6 +122,22 @@ class SandboxInvariantsTest < Minitest::Test
     refute_empty violations(base + rw("#{@home}/.sandbox-agent/network-log"))
   end
 
+  # Chrome runs a native messaging host outside any sandbox, picked by the
+  # manifests in NativeMessagingHosts: writing either one is running code on
+  # the host. See quota_gauges/install.py.
+  def test_what_chrome_runs_is_never_writable
+    refute_empty violations(base + rw("#{@home}/.local/lib/quota-gauges"))
+    refute_empty violations(base + rw("#{@home}/.local/lib/quota-gauges/native-host"))
+    refute_empty violations(base + rw("#{@home}/.config/google-chrome/NativeMessagingHosts"))
+    refute_empty violations(base + rw("#{@home}/.config/google-chrome"))
+    refute_empty violations(base + rw("#{@home}/.config"))
+    refute_empty violations(base + rw("#{@home}/.local/lib"))
+  end
+
+  def test_what_chrome_runs_may_be_read
+    assert_empty violations(base + ro("#{@home}/.local/lib/quota-gauges") + hide_daemons)
+  end
+
   def test_home_itself_is_never_writable
     refute_empty violations(base + rw(@home))
   end
@@ -133,7 +149,9 @@ class SandboxInvariantsTest < Minitest::Test
 
   def test_unrelated_dirs_may_be_writable
     assert_empty violations(base + rw("#{@home}/.local/share") + hide_daemons)
-    assert_empty violations(base + rw("#{@home}/.config"))
+    # A tool's own config dir, not the whole of ~/.config: that one holds
+    # NativeMessagingHosts (see test_what_chrome_runs_is_never_writable).
+    assert_empty violations(base + rw("#{@home}/.config/cabal"))
   end
 
   # A read-only mount does not stop a connect(): the host watchman's socket,
