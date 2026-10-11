@@ -1,0 +1,19 @@
+#!/usr/bin/ruby
+
+# Symlink to your ~/.local/bin/ directory
+#
+# Prints the coding agents this machine can start now, one per line:
+#
+#   <harness>:<model>:<effort><TAB><clear command><TAB><command line>
+#
+#   claude:opus:high	/clear	env CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude ... --model opus --effort high
+#
+# The harnesses are claude, codex, grok, vibe, opencode and pi, those not
+# installed skipped. Their models are asked of them at each run, so a new
+# model shows up without a change here. The command line is quoted for a
+# shell and turns permission prompts off: run it in a sandbox.
+
+require_relative "agent-lib"
+
+abort "usage: agent-catalog" unless ARGV.empty?
+puts AgentCatalog.lines

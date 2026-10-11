@@ -1,0 +1,33 @@
+#!/usr/bin/ruby
+
+# Symlink to your ~/.local/bin/ directory
+#
+# Picks a coding agent for each role a caller names, among agent-catalog's:
+#
+#   agent-pick --choices <file> <role>...
+#
+# The picks are remembered in <file>, one `role=spec` line each. When every
+# role has one still in the catalog, it lists them and keeps them on Enter;
+# `n`, or a role never picked, picks each role again with fzf (harness, model,
+# effort), the remembered one first. Without a terminal it keeps them, or fails.
+#
+# Prints one line per role, in order: <role><TAB> and agent-catalog's line,
+#
+#   tab1	claude:opus:high	/clear	env CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude ...
+
+require_relative "agent-lib"
+
+def usage! = abort("usage: agent-pick --choices <file> <role>...")
+
+usage! unless ARGV.length >= 3 && ARGV[0] == "--choices"
+choices = File.expand_path(ARGV[1])
+roles = ARGV.drop(2)
+
+begin
+  catalog = AgentCatalog.lines
+  raise AgentPick::Failed, "agent-catalog offers no agent" if catalog.empty?
+
+  puts AgentPick.new(catalog: catalog, choices: choices).lines(roles)
+rescue AgentPick::Failed => e
+  abort "agent-pick: #{e.message}"
+end
