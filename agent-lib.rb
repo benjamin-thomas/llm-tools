@@ -32,8 +32,8 @@ module AgentCatalog
       ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).any? { |dir| File.executable?(File.join(dir, command)) }
     end
 
-    def capture(*command)
-      out, = Open3.capture2("timeout", "20", *command, err: File::NULL)
+    def capture(*command, input: nil)
+      out, = Open3.capture2("timeout", "20", *command, stdin_data: input.to_s, err: File::NULL)
       out
     rescue SystemCallError
       ""
@@ -75,7 +75,10 @@ module AgentCatalog
     when "grok" then AgentCatalog.grok_models(host.capture("grok", "models"))
     when "vibe" then AgentCatalog.vibe_models(host.read(AgentCatalog.vibe_config))
     when "opencode" then AgentCatalog.opencode_models(host.capture("opencode", "models", "--verbose"))
-    when "pi" then AgentCatalog.pi_models(host.capture("pi", "--list-models"), host.read(AgentCatalog.pi_settings))
+    when "pi"
+      # Its RPC mode, unlike --list-models, tells each model's thinking levels.
+      rpc = host.capture("pi", "--mode", "rpc", "--no-session", input: %({"type":"get_available_models"}\n))
+      AgentCatalog.pi_models(rpc, host.read(AgentCatalog.pi_settings))
     end
   end
 
@@ -162,18 +165,40 @@ module AgentCatalog
 
   # Its scoped models (enabledModels, what its Ctrl+P cycles through), in their
   # order, names or globs; without any, the models that think, as for opencode.
-  def pi_models(table, settings = nil)
-    thinks = table.lines.drop(1).filter_map do |line|
-      provider, model, _context, _max_out, thinking = line.split
-      ["#{provider}/#{model}", thinking == "yes"] if thinking
-    end.to_h
+  def pi_models(rpc, settings = nil)
+    levels = AgentCatalog.pi_available_models(rpc).to_h do |row|
+      ["#{row["provider"]}/#{row["id"]}", AgentCatalog.pi_thinking_levels(row)]
+    end
     scoped = (JSON.parse(settings || "{}")["enabledModels"] rescue nil) || []
     models = if scoped.empty?
-               thinks.select { |_model, thinking| thinking }.keys
+               levels.reject { |_model, model_levels| model_levels == %w[off] }.keys
              else
-               scoped.flat_map { |pattern| thinks.keys.select { |model| File.fnmatch(pattern, model) } }.uniq
+               scoped.flat_map { |pattern| levels.keys.select { |model| File.fnmatch(pattern, model) } }.uniq
              end
-    models.map { |model| [model, thinks[model] ? PI_THINKING : %w[off]] }
+    models.map { |model| [model, levels[model]] }
+  end
+
+  # The models of its get_available_models answer, among the other messages
+  # its RPC mode prints.
+  def pi_available_models(rpc)
+    rpc.lines.each do |line|
+      message = JSON.parse(line) rescue next
+      return message.dig("data", "models") || [] if message["command"] == "get_available_models"
+    end
+    []
+  end
+
+  # As pi's getSupportedThinkingLevels: a level its thinkingLevelMap sets to
+  # null is out, xhigh and max only when the map names them.
+  def pi_thinking_levels(row)
+    return %w[off] unless row["reasoning"]
+
+    map = row["thinkingLevelMap"] || {}
+    PI_THINKING.select do |level|
+      next false if map.key?(level) && map[level].nil?
+
+      %w[xhigh max].include?(level) ? map.key?(level) : true
+    end
   end
 end
 

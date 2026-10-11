@@ -13,7 +13,7 @@ class FakeHost
   end
 
   def installed?(command) = @installed.include?(command)
-  def capture(*command) = @outputs.fetch(command, "")
+  def capture(*command, input: nil) = @outputs.fetch(command, "")
   def read(path) = @files[path]
 end
 
@@ -84,11 +84,21 @@ OPENCODE_MODELS = <<~TEXT
   }
 TEXT
 
-PI_MODELS = <<~TEXT
-  provider  model          context  max-out  thinking  images
-  hyper     glm-5.3        1M       128K     yes       no
-  hyper     minimax-m2.7   262.1K   6.6K     no        no
-TEXT
+# What `pi --mode rpc` answers get_available_models with, past its first lines.
+PI_MODELS = [
+  { "type" => "extension_ui_request" },
+  { "type" => "response", "command" => "get_available_models", "data" => { "models" => [
+    { "provider" => "hyper", "id" => "glm-5.3", "reasoning" => true,
+      "thinkingLevelMap" => { "off" => nil, "minimal" => nil, "low" => "low", "medium" => nil, "high" => "high",
+                              "xhigh" => nil, "max" => "max" } },
+    { "provider" => "hyper", "id" => "minimax-m2.7", "reasoning" => false },
+    { "provider" => "mistral", "id" => "mistral-large-4", "reasoning" => true,
+      "thinkingLevelMap" => { "off" => "none", "minimal" => nil, "low" => nil, "medium" => nil, "high" => "high",
+                              "xhigh" => nil, "max" => nil } },
+    { "provider" => "hyper", "id" => "plain", "reasoning" => true }
+  ] } }
+].map { |message| JSON.generate(message) }.join("\n")
+PI_RPC = %w[pi --mode rpc --no-session].freeze
 
 class AgentCatalogTest < Minitest::Test
   def lines(host) = AgentCatalog.lines(host)
@@ -181,13 +191,24 @@ class AgentCatalogTest < Minitest::Test
 
   def pi_host(settings = nil)
     files = settings ? { File.join(Dir.home, ".pi", "agent", "settings.json") => JSON.generate(settings) } : {}
-    FakeHost.new(installed: %w[pi], outputs: { %w[pi --list-models] => PI_MODELS }, files: files)
+    FakeHost.new(installed: %w[pi], outputs: { PI_RPC => PI_MODELS }, files: files)
   end
 
-  def test_pi_without_scoped_models_offers_each_model_that_thinks_at_its_thinking_levels
-    assert_equal %w[pi:hyper/glm-5.3:off pi:hyper/glm-5.3:minimal pi:hyper/glm-5.3:low pi:hyper/glm-5.3:medium
-                    pi:hyper/glm-5.3:high pi:hyper/glm-5.3:xhigh pi:hyper/glm-5.3:max], specs(pi_host)
+  def test_pi_without_scoped_models_offers_each_model_that_thinks
+    assert_equal %w[hyper/glm-5.3 mistral/mistral-large-4 hyper/plain],
+                 specs(pi_host).map { |spec| spec.split(":")[1] }.uniq
     assert_includes lines(pi_host), "pi:hyper/glm-5.3:high\t/new\tpi --model hyper/glm-5.3 --thinking high"
+  end
+
+  # As pi's own picker: a level its map sets to null is out, xhigh and max
+  # only when it maps them.
+  def test_pi_offers_each_model_the_thinking_levels_pi_lets_it_take
+    efforts = lambda do |model|
+      specs(pi_host).select { |spec| spec.start_with?("pi:#{model}:") }.map { |spec| spec.split(":").last }
+    end
+    assert_equal %w[low high max], efforts.call("hyper/glm-5.3")
+    assert_equal %w[off high], efforts.call("mistral/mistral-large-4")
+    assert_equal %w[off minimal low medium high], efforts.call("hyper/plain")
   end
 
   # Its scoped models, those its Ctrl+P cycles through, are the ones you chose.
@@ -205,7 +226,7 @@ class AgentCatalogTest < Minitest::Test
 
   def test_pi_reads_its_settings_under_its_agent_dir
     ENV["PI_CODING_AGENT_DIR"] = "/elsewhere"
-    host = FakeHost.new(installed: %w[pi], outputs: { %w[pi --list-models] => PI_MODELS },
+    host = FakeHost.new(installed: %w[pi], outputs: { PI_RPC => PI_MODELS },
                         files: { "/elsewhere/settings.json" => JSON.generate("enabledModels" => %w[hyper/minimax-m2.7]) })
     assert_equal %w[pi:hyper/minimax-m2.7:off], specs(host)
   ensure
@@ -223,7 +244,7 @@ class AgentCatalogTest < Minitest::Test
   end
 
   def test_harnesses_come_in_a_fixed_order
-    host = FakeHost.new(installed: %w[pi claude], outputs: { %w[pi --list-models] => PI_MODELS })
+    host = FakeHost.new(installed: %w[pi claude], outputs: { PI_RPC => PI_MODELS })
     assert_equal %w[claude pi], specs(host).map { |spec| spec.split(":").first }.uniq
   end
 end
