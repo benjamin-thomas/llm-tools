@@ -1,0 +1,7 @@
+{
+  "uuid": "quota-gauges@benjamin-thomas",
+  "name": "Quota gauges",
+  "description": "Subscription meters in the top bar, each against an even pace: Claude week, Hyper day, Mistral month. Data from quota-gauges --json.",
+  "shell-version": ["42"],
+  "version": 1
+}

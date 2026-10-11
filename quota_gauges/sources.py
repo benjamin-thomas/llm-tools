@@ -61,8 +61,28 @@ def hyper_gauge(balance: float | None, now: datetime, problem: str = "") -> Gaug
         return Gauge("hyper", "Hyper day", None, start, end, problem=problem)
     return Gauge(
         "hyper", "Hyper day", hyper_used(balance), start, end,
-        detail=f"{balance:g} left of {HYPER_DAILY}",
+        detail=f"{balance:g} HC left of {HYPER_DAILY}",
     )
+
+
+# Hyper's API gives no refresh time, so every change of the balance is kept
+# here with its time: the day turns where the balance jumps back up, which is
+# what HYPER_RESET (token_recap/windows.py) is checked against.
+HYPER_LOG = Path.home() / ".cache" / "quota-gauges" / "hyper-balance.log"
+
+
+def record_balance(log: Path, now: datetime, balance: float | None) -> None:
+    if balance is None:
+        return
+    try:
+        lines = log.read_text().splitlines()
+    except OSError:
+        lines = []
+    if lines and lines[-1].split()[-1] == f"{balance:g}":
+        return
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a") as out:
+        out.write(f"{now.isoformat()} {balance:g}\n")
 
 
 def mistral_gauge(reading: dict[str, Any] | None, now: datetime) -> Gauge:

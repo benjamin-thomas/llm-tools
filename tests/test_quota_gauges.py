@@ -17,7 +17,7 @@ from quota_gauges.gauge import (
     runs_out_at,
     tone,
 )
-from quota_gauges.sources import claude_gauges, hyper_gauge, mistral_gauge, read_mistral
+from quota_gauges.sources import claude_gauges, hyper_gauge, mistral_gauge, read_mistral, record_balance
 from token_recap.hyper_usage import hyper_key
 from token_recap.windows import hyper_window
 from quota_gauges.cli import as_json, render_line
@@ -88,6 +88,15 @@ class PaceTest(unittest.TestCase):
 class ToneTest(unittest.TestCase):
     def test_under_pace_is_fine(self) -> None:
         self.assertEqual(tone(week(0.65), NOW), "ok")
+
+    def test_well_under_pace_says_there_is_room_to_spare(self) -> None:
+        """37% used with 74% of the week gone: budget left on the table."""
+        self.assertEqual(tone(week(0.37), NOW), "under")
+
+    def test_early_in_a_window_nothing_is_called_underused(self) -> None:
+        early = TUESDAY + timedelta(hours=12)  # 7% of the week gone
+        gauge = Gauge("w", "W", 0.0, TUESDAY, TUESDAY + timedelta(days=7))
+        self.assertEqual(tone(gauge, early), "ok")
 
     def test_slightly_over_pace_is_a_warning(self) -> None:
         """Any overspend runs out before the reset at the current rate, so
@@ -203,29 +212,52 @@ class StatuslineSourceTest(unittest.TestCase):
         self.assertIsNone(limits_from_statusline({}, NOW))
 
 
+class HyperLogTest(unittest.TestCase):
+    """Hyper does not say when it refills, so every change of the balance is
+    kept with its time: the jump back up shows when the day really turns."""
+
+    def test_a_change_is_appended_and_a_repeat_is_not(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "sub" / "hyper-balance.log"
+            record_balance(log, NOW, 86)
+            record_balance(log, NOW + timedelta(minutes=1), 86)
+            record_balance(log, NOW + timedelta(minutes=2), 250)
+            lines = log.read_text().splitlines()
+        self.assertEqual(lines, [
+            f"{NOW.isoformat()} 86",
+            f"{(NOW + timedelta(minutes=2)).isoformat()} 250",
+        ])
+
+    def test_no_balance_records_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "hyper-balance.log"
+            record_balance(log, NOW, None)
+            self.assertFalse(log.exists())
+
+
 class HyperSourceTest(unittest.TestCase):
-    def test_the_day_runs_from_the_last_six_pm_in_paris(self) -> None:
+    def test_the_day_runs_from_the_last_refresh(self) -> None:
+        """16:33 UTC, which is 18:33 in Paris in summer."""
         start, end = hyper_window(NOW)
-        self.assertEqual(start, datetime(2026, 10, 10, 18, 0, tzinfo=PARIS))
-        self.assertEqual(end, datetime(2026, 10, 11, 18, 0, tzinfo=PARIS))
+        self.assertEqual(start, datetime(2026, 10, 10, 18, 33, tzinfo=PARIS))
+        self.assertEqual(end, datetime(2026, 10, 11, 18, 33, tzinfo=PARIS))
 
-    def test_after_six_pm_the_new_day_has_begun(self) -> None:
-        start, _ = hyper_window(datetime(2026, 10, 11, 18, 30, tzinfo=PARIS))
-        self.assertEqual(start, datetime(2026, 10, 11, 18, 0, tzinfo=PARIS))
+    def test_after_the_refresh_the_new_day_has_begun(self) -> None:
+        start, _ = hyper_window(datetime(2026, 10, 11, 18, 40, tzinfo=PARIS))
+        self.assertEqual(start, datetime(2026, 10, 11, 18, 33, tzinfo=PARIS))
 
-    def test_six_pm_stays_six_pm_across_the_clock_change(self) -> None:
-        """25 Oct 2026 drops to UTC+1: the day is 25 hours long, not shifted."""
-        start, end = hyper_window(datetime(2026, 10, 25, 20, 0, tzinfo=PARIS))
-        self.assertEqual(start.astimezone(PARIS).hour, 18)
-        self.assertEqual(end.astimezone(PARIS).hour, 18)
-        start, end = hyper_window(datetime(2026, 10, 25, 12, 0, tzinfo=PARIS))
-        self.assertEqual(end - start, timedelta(hours=25))
+    def test_the_refresh_keeps_to_utc_across_the_clock_change(self) -> None:
+        """From 25 Oct Paris is UTC+1, so the refresh moves to 17:33 there,
+        and every Hyper day stays 24 hours long."""
+        start, end = hyper_window(datetime(2026, 10, 26, 20, 0, tzinfo=PARIS))
+        self.assertEqual(start, datetime(2026, 10, 26, 17, 33, tzinfo=PARIS))
+        self.assertEqual(end - start, timedelta(hours=24))
 
     def test_used_is_what_the_balance_no_longer_holds(self) -> None:
         gauge = hyper_gauge(89, NOW)
         assert gauge.used is not None
         self.assertAlmostEqual(gauge.used, 161 / 250)
-        self.assertEqual(gauge.detail, "89 left of 250")
+        self.assertEqual(gauge.detail, "89 HC left of 250")
         self.assertTrue(gauge.paced)
 
     def test_a_topped_up_balance_reads_as_nothing_used(self) -> None:
@@ -350,6 +382,34 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(got["resets_at"], "2026-10-13T12:00:00+02:00")
         self.assertIsNotNone(got["runs_out_at"])
         json.dumps(got)  # every field must serialise
+
+    def test_json_carries_each_phrase_apart_for_the_panel_to_lay_out(self) -> None:
+        got = as_json([week(0.65)], NOW)[0]["phrases"]
+        self.assertEqual(got["pace"], "pace 74%")
+        self.assertEqual(got["room"], "+9 room")
+        self.assertEqual(got["outlook"], "→ 88% at reset")
+        self.assertEqual(got["resets"], "resets in 1d 20h 20m")
+        self.assertEqual(got["as_of"], "")
+
+    def test_json_says_in_plain_words_how_the_pace_stands(self) -> None:
+        said = [as_json([week(u)], NOW)[0]["phrases"]["status"] for u in (0.37, 0.65, 0.80, 0.95, None)]
+        self.assertEqual(said, ["room to spare", "on track", "a bit fast", "too fast", "no reading"])
+
+    def test_json_gives_the_reset_to_the_hour_or_minute(self) -> None:
+        """A glance needs "1d 20h", not "1d 20h 20m"."""
+        self.assertEqual(as_json([week(0.65)], NOW)[0]["phrases"]["resets_short"], "resets in 1d 20h")
+        soon = Gauge("h", "H", 0.5, NOW - timedelta(hours=23), NOW + timedelta(minutes=8))
+        self.assertEqual(as_json([soon], NOW)[0]["phrases"]["resets_short"], "resets in 8m")
+
+    def test_an_overspent_gauge_says_when_it_runs_out(self) -> None:
+        got = as_json([week(0.90)], NOW)[0]["phrases"]
+        self.assertEqual((got["room"], got["outlook"]), ("-16 over", "out Mon 05:24"))
+
+    def test_json_carries_the_line_a_menu_shows(self) -> None:
+        """The panel extension shows these lines as they are, so the wording
+        lives in one place, here."""
+        got = as_json([week(0.65)], NOW)[0]
+        self.assertEqual(got["line"], render_line(week(0.65), NOW))
 
 
 if __name__ == "__main__":

@@ -130,7 +130,7 @@ def api_window(now: datetime) -> Window:
 
 def hyper_day(now: datetime) -> Window:
     start, end = hyper_window(now)
-    return Window("18:00 Paris", start.astimezone(now.tzinfo), end.astimezone(now.tzinfo))
+    return Window("16:33 UTC", start.astimezone(now.tzinfo), end.astimezone(now.tzinfo))
 
 
 # What a box cannot see, said once in the box rather than left to be guessed.
@@ -203,7 +203,7 @@ def _grok_meter(live: XaiUsage | None, logged: GrokLimits | None) -> Meter:
 
 def _hyper_meter(balance: float | None, asked: bool, keyed: bool) -> Meter:
     if balance is not None:
-        return Meter(hyper_used(balance), f"{balance:g} left of {HYPER_DAILY}")
+        return Meter(hyper_used(balance), f"{balance:g} HC left of {HYPER_DAILY}")
     if not keyed:
         return Meter(None, "not available: no Hyper API key")
     if not asked:

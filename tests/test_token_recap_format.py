@@ -288,7 +288,8 @@ class PaceMarkerTest(unittest.TestCase):
 
     def test_its_colour_says_whether_there_is_room(self) -> None:
         green, yellow, red = "\x1b[32m┃", "\x1b[33m┃", "\x1b[31m┃"
-        self.assertIn("\x1b[32m│", meter_bar(Meter(0.36, ""), Palette(True), pace=0.74))
+        self.assertIn("\x1b[34m│", meter_bar(Meter(0.36, ""), Palette(True), pace=0.74))  # room to spare
+        self.assertIn("\x1b[32m│", meter_bar(Meter(0.60, ""), Palette(True), pace=0.74))
         self.assertIn(yellow, meter_bar(Meter(0.80, ""), Palette(True), pace=0.74))
         self.assertIn(red, meter_bar(Meter(0.95, ""), Palette(True), pace=0.74))
         del green

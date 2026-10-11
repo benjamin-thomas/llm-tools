@@ -1,0 +1,55 @@
+/* Loaded by GNOME Shell with the extension. Colours that follow a gauge's
+   tone or brand are set inline from extension.js; these are the fixed ones. */
+
+/* In the top bar: an initial and its bar — three times. */
+.qg-initial {
+  font-weight: bold;
+  margin-left: 16px;
+  margin-right: 6px;
+}
+
+.qg-strip .qg-initial:first-child {
+  margin-left: 4px;
+}
+
+.qg-bar {
+  width: 72px;
+  height: 12px;
+}
+
+/* In the open menu: one card per subscription. */
+.qg-card {
+  min-width: 420px;
+  spacing: 8px;
+  padding: 6px 4px;
+}
+
+.qg-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 5px;
+  margin-right: 8px;
+}
+
+.qg-card-name {
+  font-weight: bold;
+  font-size: 1.1em;
+}
+
+.qg-card-span {
+  color: #9a9996;
+  font-size: 1.1em;
+  margin-left: 6px;
+}
+
+.qg-card-bar {
+  height: 16px;
+}
+
+.qg-used {
+  font-weight: bold;
+}
+
+.qg-dim {
+  color: #9a9996;
+}

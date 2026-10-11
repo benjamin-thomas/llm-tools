@@ -111,7 +111,7 @@ to `~/.local/bin/`.
 box per subscription over its current window (Claude's week, Mistral's month,
 Hyper's billing month from the 12th), priced at each provider's API list rate.
 Each box's `used` bar is the provider's own meter (Hyper's is daily, from
-18:00 Paris), with a tick where an even pace would be.
+16:33 UTC), with a tick where an even pace would be.
 `quota-gauges` prints just those meters, one line each (`--json` for scripts).
 
 Mistral serves its Vibe budget only to a logged-in browser, so a Chrome
@@ -126,6 +126,19 @@ says which files changed, so read those changes before you run it.
 `NativeMessagingHosts`, writable. Then in `chrome://extensions`, Developer
 mode → Load unpacked → `~/.local/lib/quota-gauges/chrome/` (or reload it after
 a reinstall). It reads the budget within a few seconds, then every minute.
+
+A GNOME Shell extension (`quota-gauges-gnome/`, GNOME 42) keeps three of the
+meters in the top bar, TopHat style: Claude's week, Hyper's day and Mistral's
+month, each a small bar coloured by how it stands against an even pace, with
+a white tick at that pace; a click shows the `quota-gauges` lines. It runs the
+installed `quota-gauges --json` every minute. `./quota-gauges install` puts it
+in `~/.local/share/gnome-shell/extensions/`, which `sandbox-lib.rb` also
+refuses to mount writable. After the first install, restart GNOME Shell
+(Alt+F2, `r` on Xorg; log out and in on Wayland), then:
+
+```bash
+gnome-extensions enable quota-gauges@benjamin-thomas
+```
 
 ```bash
 python3 -m pytest tests/test_token_recap_*.py tests/test_quota_gauges*.py

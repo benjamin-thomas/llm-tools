@@ -16,6 +16,10 @@ MIN_ELAPSED = 0.05
 MAX_AGE = timedelta(minutes=30)
 # How far over an even pace still only earns a warning.
 WARN_BAND = 0.10
+# How far under an even pace counts as budget left on the table. It also keeps
+# the start of a window quiet: nothing can be this far under before a quarter
+# of the window has gone.
+UNDER_BAND = 0.25
 # For a gauge with no pace to compare against, how full is worrying.
 UNPACED_WARN = 0.70
 UNPACED_OVER = 0.90
@@ -84,7 +88,7 @@ def is_stale(gauge: Gauge, now: datetime) -> bool:
 
 
 def tone(gauge: Gauge, now: datetime) -> str:
-    """ok, warn, over, stale or unknown: the colour a gauge deserves."""
+    """under, ok, warn, over, stale or unknown: the colour a gauge deserves."""
     if gauge.used is None:
         return "unknown"
     if is_stale(gauge, now):
@@ -96,6 +100,8 @@ def tone(gauge: Gauge, now: datetime) -> str:
         if gauge.used >= UNPACED_OVER:
             return "over"
         return "warn" if gauge.used >= UNPACED_WARN else "ok"
+    if room >= UNDER_BAND:
+        return "under"
     if room >= 0:
         return "ok"
     return "warn" if room > -WARN_BAND else "over"

@@ -6,6 +6,7 @@ import io
 import json
 import os
 import struct
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -138,7 +139,30 @@ class InstallTest(unittest.TestCase):
         from quota_gauges.install import install
 
         dest, hosts = Path(tmp) / "share", Path(tmp) / "hosts"
-        return install(self.ROOT, dest, hosts), dest, hosts
+        extensions = Path(tmp) / "extensions"
+        return install(self.ROOT, dest, hosts, extensions), dest, hosts
+
+    def test_the_python_tools_are_copied_and_runnable_from_the_copy(self) -> None:
+        """The panel extension runs `quota-gauges --json` from the copy."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _, dest, _ = self._install(tmp)
+            for package in ("token_recap", "quota_gauges"):
+                for src in (self.ROOT / package).glob("*.py"):
+                    self.assertEqual((dest / package / src.name).read_bytes(), src.read_bytes())
+            self.assertFalse(list(dest.rglob("__pycache__")))
+            launcher = dest / "quota-gauges"
+            self.assertTrue(os.access(launcher, os.X_OK))
+            out = subprocess.run([str(launcher), "--help"], capture_output=True, text=True, cwd=tmp)
+            self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_the_gnome_extension_is_installed_under_its_uuid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self._install(tmp)
+            uuid = json.loads((self.ROOT / "quota-gauges-gnome" / "metadata.json").read_text())["uuid"]
+            folder = Path(tmp) / "extensions" / uuid
+            for name in ("metadata.json", "extension.js"):
+                src = self.ROOT / "quota-gauges-gnome" / name
+                self.assertEqual((folder / name).read_bytes(), src.read_bytes())
 
     def test_the_extension_and_host_are_copied_out_of_the_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -165,6 +189,7 @@ class InstallTest(unittest.TestCase):
             (dest / "chrome" / "background.js").write_text("tampered")
             report, _, _ = self._install(tmp)
         changed = [line for line in report if not line.startswith("unchanged ")]
+        self.assertGreater(len(report), 1)
         self.assertEqual(len(changed), 1)
         self.assertIn("chrome/background.js", changed[0])
         self.assertTrue(changed[0].startswith("changed "))

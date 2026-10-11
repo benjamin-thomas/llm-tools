@@ -59,29 +59,25 @@ def next_weekly_reset(now: datetime, spec: WeeklyReset) -> datetime:
     return last_weekly_reset(now, spec) + timedelta(days=7)
 
 
-# Charm Hyper's daily allowance refills at 18:00 Paris wall-clock time, as
-# observed on this account; Hyper publishes no reset. Whether the anchor is
-# really Paris, UTC or New York only shows across a clock change (25 Oct in
-# Europe, 1 Nov in the US).
-HYPER_RESET = time(18, 0)
-HYPER_TZ = ZoneInfo("Europe/Paris")
+# Charm Hyper's daily allowance refills at 16:33 UTC: on Sun 11 Oct 2026 its
+# billing page said "Next Hypercredit Refresh in 31 minutes" at 18:02 Paris,
+# and quota-gauges logs every change of the balance (hyper-balance.log) to
+# pin the minute. UTC because a server counting days counts them in UTC: if
+# after 25 Oct the refresh lands at 18:33 Paris rather than 17:33, the anchor
+# was Paris wall-clock time after all.
+HYPER_RESET = time(16, 33)
+HYPER_RESET_TZ = timezone.utc
+# The billing month is a calendar matter, kept in local time.
+HYPER_BILLING_TZ = ZoneInfo("Europe/Paris")
 
 
 def hyper_window(now: datetime) -> tuple[datetime, datetime]:
-    """The Hyper day holding `now`, from one 18:00 Paris to the next.
-
-    Built from wall-clock dates rather than by adding 24h, so the day around a
-    clock change is 23 or 25 hours long instead of drifting off 18:00. Handed
-    back in UTC: Python subtracts two datetimes sharing a zone by wall clock,
-    which would make that day 24 hours long again.
-    """
-    local = now.astimezone(HYPER_TZ)
-    day = local.date()
-    if datetime.combine(day, HYPER_RESET, tzinfo=HYPER_TZ) > now:
+    """The Hyper day holding `now`, from one refresh to the next, in UTC."""
+    day = now.astimezone(HYPER_RESET_TZ).date()
+    if datetime.combine(day, HYPER_RESET, tzinfo=HYPER_RESET_TZ) > now:
         day -= timedelta(days=1)
-    start = datetime.combine(day, HYPER_RESET, tzinfo=HYPER_TZ)
-    end = datetime.combine(day + timedelta(days=1), HYPER_RESET, tzinfo=HYPER_TZ)
-    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    start = datetime.combine(day, HYPER_RESET, tzinfo=HYPER_RESET_TZ)
+    return start, start + timedelta(days=1)
 
 
 # The Hyper subscription began on 12 Sep 2026, so it bills from the 12th.
@@ -95,13 +91,13 @@ def hyper_billing_window(now: datetime) -> tuple[datetime, datetime]:
     of the Hyper box are summed over this instead. Midnight Paris is a guess:
     the payment time is not known, and a few hours either way change little.
     """
-    local = now.astimezone(HYPER_TZ)
+    local = now.astimezone(HYPER_BILLING_TZ)
     year, month = local.year, local.month
     if local.day < HYPER_BILLING_DAY:
         year, month = (year - 1, 12) if month == 1 else (year, month - 1)
-    start = datetime(year, month, HYPER_BILLING_DAY, tzinfo=HYPER_TZ)
+    start = datetime(year, month, HYPER_BILLING_DAY, tzinfo=HYPER_BILLING_TZ)
     year, month = (year + 1, 1) if month == 12 else (year, month + 1)
-    return start, datetime(year, month, HYPER_BILLING_DAY, tzinfo=HYPER_TZ)
+    return start, datetime(year, month, HYPER_BILLING_DAY, tzinfo=HYPER_BILLING_TZ)
 
 
 def local_tz() -> tzinfo:

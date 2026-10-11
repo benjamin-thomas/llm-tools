@@ -225,7 +225,7 @@ class HyperReportTest(unittest.TestCase):
                 "cache": {"read": 5_000, "write": 0},
             },
         }
-        # Inside the current Hyper day, which began at 18:00.
+        # Inside the current Hyper day, which began at 18:33 Paris.
         when = created or HyperReportTest.NOW - timedelta(hours=1)
         return ("m1", int(when.timestamp() * 1000), json.dumps(data))
 
@@ -282,8 +282,8 @@ class HyperReportTest(unittest.TestCase):
 
     def test_the_hyper_card_reads_the_daily_allowance(self) -> None:
         card = "\n".join(self._card(self._report("hyper", balance=88), "Charm Hyper"))
-        self.assertIn("65% · pace 17%", card)  # 162 of 250 spent, 4h of 24 gone
-        self.assertIn("88 left of 250", card)
+        self.assertIn("65% · pace 14%", card)  # 162 of 250 spent, 3h27 of 24 gone
+        self.assertIn("88 HC left of 250", card)
 
     def test_the_hyper_card_says_its_tokens_are_this_machine_only(self) -> None:
         """The allowance is shared with another device; the logs are not."""
@@ -328,9 +328,9 @@ class HyperReportTest(unittest.TestCase):
         self.assertIn("Hyper", report)  # and a row of its own in the snapshot
 
     def test_the_meter_covers_the_hyper_day(self) -> None:
-        """The allowance refills at 18:00 Paris, so the gauge runs from the last one."""
+        """The allowance refills at 16:33 UTC, so the gauge runs from the last one."""
         card = self._card(self._report("hyper"), "Charm Hyper")
-        self.assertIn("29 Aug 18:00 → 30 Aug 18:00", card[1])
+        self.assertIn("29 Aug 18:33 → 30 Aug 18:33", card[1])
 
     def test_the_tokens_cover_the_billing_month(self) -> None:
         """A day of tokens cannot be set against a monthly price; a month can."""

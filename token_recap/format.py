@@ -40,6 +40,9 @@ class Palette:
     def green(self, text: str) -> str:
         return self.wrap("32", text)
 
+    def blue(self, text: str) -> str:
+        return self.wrap("34", text)
+
     def magenta(self, text: str) -> str:
         return self.wrap("35", text)
 
@@ -343,16 +346,19 @@ def render_provider(
     return _box(view.title, body, pal, width, accent=view.key)
 
 
-# How far over an even pace still only earns a yellow tick.
+# How far over an even pace still only earns a yellow tick, and how far under
+# it is budget left on the table (quota_gauges.gauge holds the same two).
 _PACE_WARN = 0.10
+_PACE_UNDER = 0.25
 
 
 def meter_bar(meter: Meter, pal: Palette, pace: float | None = None) -> str:
     """The provider's own reading, with a tick where an even pace would be.
 
     The tick is the rule of three made visible: with 74% of the window gone,
-    74% used is right on pace. Green means room to spare, yellow a little
-    over, red well over — at that rate the allowance runs out before the reset.
+    74% used is right on pace. Green means on pace or a little under, blue
+    well under — budget left on the table — yellow a little over, and red
+    well over: at that rate the allowance runs out before the reset.
     """
     if meter.used is None:
         return f"{pal.dim(bar(0.0, 20))}  {pal.dim(meter.note)}"
@@ -366,7 +372,12 @@ def meter_bar(meter: Meter, pal: Palette, pace: float | None = None) -> str:
         at = min(width - 1, int(max(0.0, pace) * width))
         tick = "┃" if cells[at] == "█" else "│"
         room = pace - meter.used
-        colour = pal.green if room >= 0 else pal.yellow if room > -_PACE_WARN else pal.red
+        if room >= _PACE_UNDER:
+            colour = pal.blue
+        elif room >= 0:
+            colour = pal.green
+        else:
+            colour = pal.yellow if room > -_PACE_WARN else pal.red
         gauge = pal.cyan("".join(cells[:at])) + colour(tick) + pal.cyan("".join(cells[at + 1 :]))
         caption += f" · pace {pace * 100:.0f}%"
     if meter.note:
