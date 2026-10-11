@@ -981,6 +981,15 @@ module SandboxLib
     grok_dir = ENV["GROK_HOME"]&.then { |d| File.expand_path(d) } || "#{home}/.grok"
     args.push(*rw(grok_dir)) if File.directory?(grok_dir)
 
+    # vibe (Mistral): config.toml, history, logs, sessions and caches all live
+    # under ~/.vibe, written at runtime — rw. The binary is a uv tool under
+    # ~/.local, already ro. Its API key is read from $MISTRAL_API_KEY or
+    # ~/.vibe/.env before the OS keyring, which is out of reach here by design:
+    # keep the key in .env, read at every vibe start, so a vibe opened later in
+    # another pane finds it too.
+    vibe_dir = "#{home}/.vibe"
+    args.push(*rw(vibe_dir)) if File.directory?(vibe_dir)
+
     # VS Code / Devin Desktop (Electron IDEs). The binaries resolve under
     # /usr/share (already mounted ro), so only the per-user state under $HOME
     # needs binding — and rw, since Electron writes caches, lock files and

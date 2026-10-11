@@ -185,6 +185,7 @@ parser = OptionParser.new do |opts|
   opts.separator "  sandbox-agent . -- codex-yolo"
   opts.separator "  sandbox-agent . -- kimi -y"
   opts.separator "  sandbox-agent . -- grok --always-approve"
+  opts.separator "  sandbox-agent . -- vibe-yolo"
   opts.separator "  sandbox-agent . -- opencode       # already yolo by default"
   opts.separator "  sandbox-agent . -- pi             # already yolo by default"
   opts.separator "  sandbox-agent . -- omp            # already yolo by default"
