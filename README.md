@@ -88,16 +88,14 @@ The integration suite also needs Bubblewrap, tmux and Herdr installed at
 `agent-catalog` prints the coding agents this machine can start now, one per
 line: `harness:model:effort`, the slash command that clears the agent's
 context, and its command line, with permission prompts off. The harnesses are
-claude, codex, grok, vibe, opencode and pi; their models are asked of them at
-each run. `agent-lib.rb` is the only place that knows a harness's flags.
-opencode's TUI takes no reasoning effort, so its agents start through
-`opencode-variant <provider/model> <variant>`, which sets the variant the TUI
-remembers for that model first. pi offers its scoped models (`enabledModels`),
-opencode and pi without them only the models that think.
+claude, codex, grok and pi; their models are asked of them at each run.
+`agent-lib.rb` is the only place that knows a harness's flags, and says why
+vibe and opencode are left out. pi offers its scoped models (`enabledModels`),
+without them only the models that think.
 
 `agent-pick --choices <file> <role>...` picks an agent per role with fzf,
 remembers the picks in `<file>` and keeps them on Enter at the next run. It
-prints `<role><TAB>` followed by the agent's catalog line. Symlink the three
+prints `<role><TAB>` followed by the agent's catalog line. Symlink the two
 to `~/.local/bin/`.
 
 ```bash

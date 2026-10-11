@@ -36,54 +36,6 @@ GROK_MODELS = <<~TEXT
     - grok-4.5
 TEXT
 
-VIBE_CONFIG = <<~TOML
-  active_model = "glm-5-3"
-
-  [[providers]]
-  name = "mistral"
-
-  [[models]]
-  name = "mistral-vibe-cli-latest"
-  provider = "mistral"
-  alias = "mistral-medium-3.5"
-  thinking = "high"
-
-  [[models]]
-  name = "devstral"
-  alias = "local"
-TOML
-
-OPENCODE_MODELS = <<~TEXT
-  hyper/glm-5.3
-  {
-    "id": "glm-5.3",
-    "capabilities": {"reasoning": true, "toolcall": true, "output": {"text": true, "audio": false}},
-    "variants": {}
-  }
-  mistral/mistral-medium-latest
-  {
-    "id": "mistral-medium-latest",
-    "capabilities": {"reasoning": true, "toolcall": true, "output": {"text": true}},
-    "variants": {"none": {"reasoningEffort": "none"}, "high": {"reasoningEffort": "high"}}
-  }
-  mistral/codestral-latest
-  {
-    "id": "codestral-latest",
-    "capabilities": {"reasoning": false, "toolcall": true, "output": {"text": true}},
-    "variants": {}
-  }
-  mistral/mistral-embed
-  {
-    "id": "mistral-embed",
-    "capabilities": {"toolcall": false, "output": {"text": true}}
-  }
-  mistral/voxtral-mini-tts-latest
-  {
-    "id": "voxtral-mini-tts-latest",
-    "capabilities": {"toolcall": false, "output": {"text": false, "audio": true}}
-  }
-TEXT
-
 # What `pi --mode rpc` answers get_available_models with, past its first lines.
 PI_MODELS = [
   { "type" => "extension_ui_request" },
@@ -138,55 +90,12 @@ class AgentCatalogTest < Minitest::Test
     assert_includes lines(host), "grok:grok-4.5:high\t/clear\tgrok --yolo -m grok-4.5 --reasoning-effort high"
   end
 
-  def test_vibe_offers_its_active_model_and_aliases_its_config_sets_thinking_for
-    host = FakeHost.new(installed: %w[vibe], files: { File.join(Dir.home, ".vibe", "config.toml") => VIBE_CONFIG })
-    assert_equal %w[vibe:glm-5-3:default vibe:mistral-medium-3.5:default vibe:local:default], specs(host)
-    assert_includes lines(host), "vibe:local:default\t/clear\tenv VIBE_ACTIVE_MODEL=local vibe --yolo"
-  end
-
-  def test_vibe_reads_its_config_under_vibe_home
-    ENV["VIBE_HOME"] = "/elsewhere"
-    host = FakeHost.new(installed: %w[vibe], files: { "/elsewhere/config.toml" => VIBE_CONFIG })
-    assert_includes specs(host), "vibe:local:default"
-  ensure
-    ENV.delete("VIBE_HOME")
-  end
-
-  def test_opencode_offers_the_models_that_think_call_tools_and_write_text_at_their_variants
-    host = FakeHost.new(installed: %w[opencode], outputs: { %w[opencode models --verbose] => OPENCODE_MODELS })
-    assert_equal %w[opencode:hyper/glm-5.3:default opencode:mistral/mistral-medium-latest:none
-                    opencode:mistral/mistral-medium-latest:high], specs(host)
-    assert_includes lines(host),
-                    "opencode:mistral/mistral-medium-latest:high\t/clear\topencode-variant mistral/mistral-medium-latest high"
-  end
-
-  # Its TUI takes no variant: it starts on the one it remembers per model.
-  def test_opencode_variant_is_remembered_where_the_tui_reads_it
-    Dir.mktmpdir do |dir|
-      state = File.join(dir, "opencode", "model.json")
-      FileUtils.mkdir_p(File.dirname(state))
-      File.write(state, JSON.generate("recent" => [], "variant" => { "hyper/kimi-k3" => "max", "mistral/m" => "none" }))
-      AgentCatalog.remember_opencode_variant(state, "mistral/m", "high")
-      assert_equal({ "recent" => [], "variant" => { "hyper/kimi-k3" => "max", "mistral/m" => "high" } },
-                   JSON.parse(File.read(state)))
-    end
-  end
-
-  def test_opencode_default_variant_forgets_the_remembered_one
-    Dir.mktmpdir do |dir|
-      state = File.join(dir, "model.json")
-      File.write(state, JSON.generate("variant" => { "hyper/glm-5.3" => "max" }))
-      AgentCatalog.remember_opencode_variant(state, "hyper/glm-5.3", "default")
-      assert_equal({ "variant" => {} }, JSON.parse(File.read(state)))
-    end
-  end
-
-  def test_opencode_variant_starts_a_state_file_when_none_exists
-    Dir.mktmpdir do |dir|
-      state = File.join(dir, "opencode", "model.json")
-      AgentCatalog.remember_opencode_variant(state, "mistral/m", "high")
-      assert_equal({ "variant" => { "mistral/m" => "high" } }, JSON.parse(File.read(state)))
-    end
+  # Installed, still not offered: see HARNESSES.
+  def test_vibe_and_opencode_are_not_offered
+    host = FakeHost.new(installed: %w[vibe opencode],
+                        outputs: { %w[opencode models --verbose] => "hyper/glm-5.3\n{\"capabilities\": {\"reasoning\": true, \"toolcall\": true, \"output\": {\"text\": true}}\n}\n" },
+                        files: { File.join(Dir.home, ".vibe", "config.toml") => "active_model = \"glm-5-3\"\n" })
+    assert_empty lines(host)
   end
 
   def pi_host(settings = nil)

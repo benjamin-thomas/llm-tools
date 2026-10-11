@@ -13,16 +13,25 @@ require "shellwords"
 module AgentCatalog
   module_function
 
-  HARNESSES = %w[claude codex grok vibe opencode pi].freeze
+  # Neither vibe nor opencode, though both run in a sandbox. The scripts that
+  # pick agents here drive them through herdr, which detects no vibe agent
+  # (none in 0.9.3): `herdr agent prompt` and `wait` cannot reach one.
+  #
+  # opencode's TUI cannot be started at a reasoning effort, two bugs together.
+  # Do not offer it again while both stand:
+  #   - it takes no --variant; only `opencode run` does (anomalyco/opencode#7354,
+  #     closed unfixed, PR #7358 unmerged);
+  #   - a variant configured for an agent does not reach it either
+  #     (anomalyco/opencode#7138, then #22065, closed not planned; PR #7156).
+  # It starts on the variant it remembers per model, in a state file every
+  # sandbox shares: two sessions starting one model at two efforts would run
+  # one at the wrong effort, silently. pi reaches the same providers.
+  HARNESSES = %w[claude codex grok pi].freeze
   SPEC = %r{\A([a-z]+):([A-Za-z0-9][A-Za-z0-9._/\[\]-]*):([a-z]+)\z}
 
   CLAUDE_MODELS = %w[opus fable sonnet haiku].freeze
   CLAUDE_EFFORTS = %w[low medium high xhigh max].freeze
   PI_THINKING = %w[off minimal low medium high xhigh max].freeze
-
-  # Vibe sets thinking per model in its config, and an opencode model without
-  # variants has none to pick: their one effort is `default`.
-  DEFAULT_EFFORT = %w[default].freeze
 
   CLEAR = { "pi" => "/new" }.freeze
 
@@ -73,8 +82,6 @@ module AgentCatalog
     when "claude" then CLAUDE_MODELS.map { |model| [model, CLAUDE_EFFORTS] }
     when "codex" then AgentCatalog.codex_models(host.capture("codex", "debug", "models"))
     when "grok" then AgentCatalog.grok_models(host.capture("grok", "models"))
-    when "vibe" then AgentCatalog.vibe_models(host.read(AgentCatalog.vibe_config))
-    when "opencode" then AgentCatalog.opencode_models(host.capture("opencode", "models", "--verbose"))
     when "pi"
       # Its RPC mode, unlike --list-models, tells each model's thinking levels.
       rpc = host.capture("pi", "--mode", "rpc", "--no-session", input: %({"type":"get_available_models"}\n))
@@ -94,8 +101,6 @@ module AgentCatalog
       %W[codex --dangerously-bypass-approvals-and-sandbox -m #{model} -c model_reasoning_effort=#{effort}
          -c check_for_update_on_startup=false]
     when "grok" then %W[grok --yolo -m #{model} --reasoning-effort #{effort}]
-    when "vibe" then %W[env VIBE_ACTIVE_MODEL=#{model} vibe --yolo]
-    when "opencode" then %W[opencode-variant #{model} #{effort}]
     when "pi" then %W[pi --model #{model} --thinking #{effort}]
     end
   end
@@ -119,52 +124,10 @@ module AgentCatalog
     end
   end
 
-  def vibe_config = File.join(ENV["VIBE_HOME"] || File.join(Dir.home, ".vibe"), "config.toml")
-
-  # Its active model, then the aliases of its [[models]]. Vibe also routes
-  # models its config does not name: those are reached by making one active.
-  def vibe_models(toml)
-    return [] unless toml
-
-    active = toml[/^active_model\s*=\s*"([^"]+)"/, 1]
-    aliases = toml.scan(/^alias\s*=\s*"([^"]+)"/).flatten
-    ([active].compact + aliases).uniq.map { |model| [model, DEFAULT_EFFORT] }
-  end
-
-  # Its providers list embeddings, speech and years of older models too: only
-  # those that think, call tools and write text are offered, so new ones show
-  # up with no list to keep. Its efforts are the model's variants.
-  def opencode_models(text)
-    text.scan(/^(\S+\/\S+)\n(\{.*?^\})/m).filter_map do |model, json|
-      row = JSON.parse(json)
-      capabilities = row["capabilities"] || {}
-      next unless capabilities["reasoning"] && capabilities["toolcall"] && capabilities.dig("output", "text")
-
-      variants = (row["variants"] || {}).keys
-      [model, variants.empty? ? DEFAULT_EFFORT : variants]
-    rescue JSON::ParserError
-      nil
-    end
-  end
-
-  def opencode_state = File.join(ENV["XDG_STATE_HOME"] || File.join(Dir.home, ".local", "state"), "opencode", "model.json")
-
-  # opencode's TUI takes no variant: it starts on the one it remembers per
-  # model, in its state, which also wins over an agent's configured variant.
-  # `default` forgets it, as the TUI does.
-  def remember_opencode_variant(state, model, variant)
-    data = File.file?(state) ? JSON.parse(File.read(state)) : {}
-    variants = data["variant"] ||= {}
-    variant == "default" ? variants.delete(model) : variants[model] = variant
-    FileUtils.mkdir_p(File.dirname(state))
-    File.write("#{state}.new", JSON.generate(data))
-    File.rename("#{state}.new", state)
-  end
-
   def pi_settings = File.join(ENV["PI_CODING_AGENT_DIR"] || File.join(Dir.home, ".pi", "agent"), "settings.json")
 
   # Its scoped models (enabledModels, what its Ctrl+P cycles through), in their
-  # order, names or globs; without any, the models that think, as for opencode.
+  # order, names or globs; without any, the models that think.
   def pi_models(rpc, settings = nil)
     levels = AgentCatalog.pi_available_models(rpc).to_h do |row|
       ["#{row["provider"]}/#{row["id"]}", AgentCatalog.pi_thinking_levels(row)]
