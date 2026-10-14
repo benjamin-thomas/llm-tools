@@ -98,6 +98,21 @@ class ApprovalStoreTest < Minitest::Test
     assert_equal (2..11).map { |i| "internet:v#{i}.org\n" }.sort, kept.sort
   end
 
+  # Worktrees of one repository share its folder: an edit made in a worktree
+  # diffs against what was approved in the main checkout, not against nothing.
+  def test_a_worktree_diffs_against_its_repository_approvals
+    git = ->(*args) { system("git", "-c", "user.name=t", "-c", "user.email=t@t", *args, exception: true) }
+    git.call("init", "-q", @project)
+    git.call("-C", @project, "commit", "-q", "--allow-empty", "-m", "init")
+    write_mounts(@project, "net:a.org\n")
+    capture_io { approve(@project) }
+
+    worktree = File.join(@root, "worktrees", "feature")
+    git.call("-C", @project, "worktree", "add", "-q", "-b", "feature", worktree)
+    write_mounts(worktree, "net:b.org\n")
+    assert_equal "net:a.org\n", SandboxLib.approved_content(worktree, store: @store)
+  end
+
   def test_unchanged_file_asks_nothing
     write_mounts(@project, "net:a.org\n")
     capture_io { approve(@project) }

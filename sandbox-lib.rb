@@ -449,8 +449,9 @@ module SandboxLib
   # the one place a human actually looks.
   #
   # The store, outside every sandbox's reach (see Invariants): one folder per
-  # project, named after its path like ~/.claude/projects, holding every version
-  # of its .sandbox-mounts you approved, each under its sha256.
+  # project, named after its path like ~/.claude/projects (a linked worktree's
+  # is its main checkout's), holding every version of its .sandbox-mounts you
+  # approved, each under its sha256.
   #
   #   ~/.sandbox-agent/approvals/
   #     home-me-code-github.com-org-app/
@@ -462,8 +463,20 @@ module SandboxLib
   # files without asking again; older ones are deleted at the next approval.
   APPROVALS_KEPT = 10
 
+  # A linked worktree files under its main checkout: every worktree of a
+  # repository then diffs against the last version approved in any of them.
   def project_approvals(project_dir, store: APPROVAL_DIR)
-    File.join(store, project_dir.delete_prefix("/").tr("/", "-"))
+    File.join(store, approval_key_dir(project_dir).delete_prefix("/").tr("/", "-"))
+  end
+
+  def approval_key_dir(project_dir)
+    return project_dir unless File.exist?(File.join(project_dir, ".git"))
+
+    layout = git_layout(project_dir)
+    return project_dir unless layout
+
+    common = layout[:common_dir]
+    File.basename(common) == ".git" ? File.dirname(common) : common
   end
 
   def mounts_file(project_dir) = File.join(project_dir, ".sandbox-mounts")
