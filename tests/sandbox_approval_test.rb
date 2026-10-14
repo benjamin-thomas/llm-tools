@@ -120,3 +120,78 @@ class ApprovalStoreTest < Minitest::Test
     assert_match(/already approved/, out)
   end
 end
+
+# `sandbox-agent promote`: copy a worktree's approved .sandbox-mounts up to the
+# main checkout, after showing what the main checkout would lose and gain.
+class PromoteTest < Minitest::Test
+  def setup
+    @store = Dir.mktmpdir("approvals-")
+    @root = Dir.mktmpdir("projects-")
+    @main = File.join(@root, "app")
+    @worktree = File.join(@root, "app-feature")
+    git("init", "-q", @main)
+    git("-C", @main, "commit", "-q", "--allow-empty", "-m", "init")
+    git("-C", @main, "worktree", "add", "-q", "-b", "feature", @worktree)
+  end
+
+  def teardown
+    [@store, @root].each { |d| FileUtils.remove_entry(d) }
+  end
+
+  def git(*args) = system("git", "-c", "user.name=t", "-c", "user.email=t@t", *args, exception: true)
+  def write_mounts(dir, text) = File.write(File.join(dir, ".sandbox-mounts"), text)
+  def read_mounts(dir) = File.read(File.join(dir, ".sandbox-mounts"))
+  def approve(dir) = capture_io { SandboxLib.approve_mounts!(dir, input: StringIO.new("y\n"), store: @store) }
+
+  def promote(dir, answer = "y")
+    status = nil
+    out, err = capture_io { status = SandboxLib.promote_mounts!(dir, input: StringIO.new("#{answer}\n"), store: @store) }
+    [status, out + err]
+  end
+
+  def test_copies_the_approved_file_to_the_main_checkout
+    write_mounts(@main, "net:a.org\n")
+    approve(@main)
+    write_mounts(@worktree, "net:a.org\nnet:b.org\n")
+    approve(@worktree)
+
+    status, out = promote(@worktree)
+    assert_equal 0, status
+    assert_match(/\+ net:b\.org/, out)
+    assert_equal "net:a.org\nnet:b.org\n", read_mounts(@main)
+    assert SandboxLib.mounts_approved?(@main, store: @store)
+  end
+
+  def test_creates_the_file_when_the_main_checkout_has_none
+    write_mounts(@worktree, "net:a.org\n")
+    approve(@worktree)
+    assert_equal 0, promote(@worktree).first
+    assert_equal "net:a.org\n", read_mounts(@main)
+  end
+
+  # Promoting is no way around reading: an unapproved file stays where it is.
+  def test_refuses_a_file_not_yet_approved
+    write_mounts(@main, "net:a.org\n")
+    write_mounts(@worktree, "net:evil.org\n")
+    status, out = promote(@worktree)
+    assert_equal 1, status
+    assert_match(/allow/, out)
+    assert_equal "net:a.org\n", read_mounts(@main)
+  end
+
+  def test_saying_no_leaves_the_main_checkout_alone
+    write_mounts(@main, "net:a.org\n")
+    write_mounts(@worktree, "net:b.org\n")
+    approve(@worktree)
+    assert_equal 1, promote(@worktree, "n").first
+    assert_equal "net:a.org\n", read_mounts(@main)
+  end
+
+  def test_refuses_outside_a_linked_worktree
+    write_mounts(@main, "net:a.org\n")
+    approve(@main)
+    status, out = promote(@main)
+    assert_equal 1, status
+    assert_match(/not a linked worktree/, out)
+  end
+end

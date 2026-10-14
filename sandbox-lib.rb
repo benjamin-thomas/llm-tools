@@ -479,6 +479,16 @@ module SandboxLib
     File.basename(common) == ".git" ? File.dirname(common) : common
   end
 
+  # The main checkout a linked worktree belongs to; nil for anything else (the
+  # main checkout itself, a bare repository's worktree, a plain directory).
+  def main_checkout(project_dir)
+    main = approval_key_dir(project_dir)
+    return nil if main == project_dir || !File.directory?(File.join(main, ".git"))
+    return nil if File.realpath(main) == File.realpath(project_dir)
+
+    main
+  end
+
   def mounts_file(project_dir) = File.join(project_dir, ".sandbox-mounts")
 
   # nil when the project declares nothing: there is then nothing to approve.
@@ -537,6 +547,46 @@ module SandboxLib
     Dir.glob(File.join(folder, "*")).sort_by { |f| File.mtime(f) }.reverse.drop(APPROVALS_KEPT).each { |f| File.delete(f) }
     puts "Approved. Any edit to the file will ask again."
     puts "internet: lines apply now, running sessions included; everything else at the next launch."
+    0
+  end
+
+  # Copies a worktree's .sandbox-mounts over its main checkout's, for a change
+  # worth keeping that is not committed (or the file is not tracked). Only an
+  # approved file: promoting is no way around reading it. Since approval follows
+  # the content, the main checkout is approved as soon as the copy lands.
+  def promote_mounts!(worktree_dir, input: $stdin, store: APPROVAL_DIR)
+    main = main_checkout(worktree_dir)
+    unless main
+      warn "#{worktree_dir} is not a linked worktree — nothing to promote to."
+      return 1
+    end
+    unless File.exist?(mounts_file(worktree_dir))
+      warn "#{worktree_dir} declares no mounts — nothing to promote."
+      return 1
+    end
+    unless mounts_approved?(worktree_dir, store: store)
+      warn "#{mounts_file(worktree_dir)} is not approved: run `sandbox-agent allow` first."
+      return 1
+    end
+    current = File.read(mounts_file(worktree_dir))
+    previous = File.exist?(mounts_file(main)) ? File.read(mounts_file(main)) : nil
+    if previous == current
+      puts "#{mounts_file(main)} already has this content."
+      return 0
+    end
+
+    puts "#{mounts_file(main)} would become (- removed, + added):"
+    puts
+    approval_diff(previous, current, color: $stdout.tty?).each { |l| puts "  #{l}" }
+    puts
+    print "Promote? [y/N] "
+    unless %w[y yes].include?(input.gets.to_s.strip.downcase)
+      puts "Not promoted."
+      return 1
+    end
+
+    File.write(mounts_file(main), current)
+    puts "Promoted to #{main}."
     0
   end
 
