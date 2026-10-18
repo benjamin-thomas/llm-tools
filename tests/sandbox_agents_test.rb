@@ -25,6 +25,28 @@ class SandboxAgentsTest < Minitest::Test
     ENV["HOME"] = old
   end
 
+  # The host compiles with this GHC and cabal config: a project asking for them
+  # rw still starts, with both read-only. Its store stays writable.
+  def test_haskell_toolchain_is_mounted_read_only_even_when_declared_rw
+    Dir.mktmpdir("agents-home-") do |home|
+      FileUtils.touch(File.join(home, ".gitconfig")) # required by a launch
+      ghcup = File.join(home, ".ghcup")
+      cabal_config = File.join(home, ".config", "cabal")
+      cabal_store = File.join(home, ".local", "state", "cabal")
+      [ghcup, cabal_config, cabal_store].each { |dir| FileUtils.mkdir_p(dir) }
+      Dir.mktmpdir("agents-project-") do |project|
+        File.write(File.join(project, ".sandbox-mounts"),
+                   "rw:~/.ghcup\nrw:~/.config/cabal\nrw:~/.local/state/cabal\n")
+        with_home(home) do
+          args = SandboxLib.build_base_args(project, git_rw: false)
+          assert_equal "--ro-bind", SandboxLib.effective_bind(args, ghcup)
+          assert_equal "--ro-bind", SandboxLib.effective_bind(args, cabal_config)
+          assert_equal "--bind", SandboxLib.effective_bind(args, cabal_store)
+        end
+      end
+    end
+  end
+
   def test_vibe_home_is_writable
     Dir.mktmpdir("agents-home-") do |home|
       FileUtils.touch(File.join(home, ".gitconfig")) # required by a launch

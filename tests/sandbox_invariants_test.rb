@@ -142,6 +142,17 @@ class SandboxInvariantsTest < Minitest::Test
     refute_empty violations(base + rw("#{@home}/.local/share"))
   end
 
+  # The host compiles with this GHC and cabal config (and runs ghcup itself).
+  def test_haskell_toolchain_is_never_writable
+    refute_empty violations(base + rw("#{@home}/.ghcup"))
+    refute_empty violations(base + rw("#{@home}/.ghcup/bin"))
+    refute_empty violations(base + rw("#{@home}/.config/cabal"))
+  end
+
+  def test_haskell_toolchain_may_be_read
+    assert_empty violations(base + ro("#{@home}/.ghcup") + ro("#{@home}/.config/cabal") + hide_daemons)
+  end
+
   def test_what_chrome_runs_may_be_read
     assert_empty violations(base + ro("#{@home}/.local/lib/quota-gauges") + hide_daemons)
   end
@@ -161,7 +172,7 @@ class SandboxInvariantsTest < Minitest::Test
     assert_empty violations(base + rw("#{@home}/.local/share/uv") + hide_daemons)
     # A tool's own config dir, not the whole of ~/.config: that one holds
     # NativeMessagingHosts (see test_what_chrome_runs_is_never_writable).
-    assert_empty violations(base + rw("#{@home}/.config/cabal"))
+    assert_empty violations(base + rw("#{@home}/.config/htop"))
   end
 
   # A read-only mount does not stop a connect(): the host watchman's socket,

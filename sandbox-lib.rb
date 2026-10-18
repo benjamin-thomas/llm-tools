@@ -15,7 +15,8 @@
 #    under it) are mounted rw, and the host runs code from them. A sandboxed
 #    agent can plant code there that runs outside the next time the user
 #    invokes ruby, node, claude... on the host. Fix: toolchains ro, libraries
-#    installed per project (vendor/bundle, node_modules).
+#    installed per project (vendor/bundle, node_modules). Done for Haskell:
+#    ~/.ghcup and ~/.config/cabal are always read-only (host_toolchain_paths).
 #
 # 2. Dev servers may run on the host. Some dev setups start their servers in a
 #    host terminal, from source and node_modules the agent writes: the same
@@ -332,9 +333,9 @@ module SandboxLib
 
   TOOLCHAIN_HINTS = [
     { glob: "*.cabal",          name: "Haskell (ghcup + cabal)",
-      lines: ["rw:~/.ghcup", "path:~/.ghcup/bin", "rw:~/.config/cabal", "rw:~/.local/state/cabal"] },
+      lines: ["ro:~/.ghcup", "path:~/.ghcup/bin", "ro:~/.config/cabal", "rw:~/.local/state/cabal"] },
     { glob: "cabal.project",    name: "Haskell (ghcup + cabal)",
-      lines: ["rw:~/.ghcup", "path:~/.ghcup/bin", "rw:~/.config/cabal", "rw:~/.local/state/cabal"] },
+      lines: ["ro:~/.ghcup", "path:~/.ghcup/bin", "ro:~/.config/cabal", "rw:~/.local/state/cabal"] },
     { glob: "package.json",     name: "Node — pick your version manager",
       lines: ["rw:~/.nvm", "path:~/.nvm/versions/node/<version>/bin", "# or volta / fnm — see --help"] },
     { glob: "Gemfile",          name: "Ruby (rbenv)",
@@ -721,6 +722,14 @@ module SandboxLib
     "#{home}/.local/share/gnome-shell/extensions",
   ]
 
+  # Compilers the host builds with: a sandbox that rewrote one would plant code
+  # in whatever the host compiles next. Mounted read-only whatever a project
+  # declares; libraries stay writable in their own stores (~/.local/state/cabal).
+  def host_toolchain_paths(home) = [
+    "#{home}/.ghcup",
+    "#{home}/.config/cabal",
+  ]
+
   FORBIDDEN_ENV = %w[SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS GPG_AGENT_INFO].freeze
 
   BIND_FLAGS = %w[--bind --ro-bind --dev-bind --bind-try --ro-bind-try --dev-bind-try].freeze
@@ -800,6 +809,14 @@ module SandboxLib
       host_run_paths(home).each do |run|
         violations << "#{arg} #{src} makes #{run} writable: the desktop runs what it holds" if exposes?(src, run)
       end
+    end
+
+    host_toolchain_paths(home).each do |tool|
+      writable = args.each_with_index.any? do |arg, i|
+        %w[--bind --dev-bind --bind-try --dev-bind-try].include?(arg) &&
+          exposes?(args[i + 1], tool) && effective_bind(args, tool) != "--ro-bind"
+      end
+      violations << "#{tool} is writable: the host compiles with it" if writable
     end
 
     args.each_cons(2) do |flag, name|
@@ -1208,6 +1225,12 @@ module SandboxLib
       when *NETWORK_MODES then nil # opened by sandbox-agent, see sandbox-network.rb
       else warn "Unknown mount mode '#{mount[:mode]}' in .sandbox-mounts: #{mount[:line]}"
       end
+    end
+
+    # --- host toolchains read-only, after .sandbox-mounts so a rw line cannot win ---
+    host_toolchain_paths(home).each do |tool|
+      declared = declared_mounts.any? { |m| %w[ro rw].include?(m[:mode]) && exposes?(m[:path], tool) }
+      args.push(*ro(tool)) if declared && File.exist?(tool)
     end
 
     # --- no SSH, last word ---
