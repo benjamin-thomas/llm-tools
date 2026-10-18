@@ -50,6 +50,11 @@ const COLOURS = {
 const STYLE = 'frame';
 // The frame: a soft grey rather than white, which pulled the eye too hard.
 const FRAME_RGBA = [0.78, 0.78, 0.76, 0.55];
+// Once used spills past time, the soft grey vanishes into the fill: time is
+// then a dark notch across it instead. Only the edge, as a whole dark frame
+// made the fill look shorter than the spill.
+const NOTCH_RGBA = [0.1, 0.1, 0.1, 0.9];
+const NOTCH_WIDTH = 2;
 // How much of the bar's height the used strip takes ('strip' only).
 const STRIP = 0.18;
 // Barely rounded: full pill ends cropped the strip into a sliver.
@@ -110,9 +115,13 @@ function paintGauge(area, gauge) {
             cr.rectangle(0, 0, width * used, height);
             cr.fill();
         }
-        // Drawn last, so it reads over the fill; inset by half its width so
-        // the whole line lands inside the bar.
-        if (time !== null && time > 0) {
+        // Drawn last, so it reads over the fill.
+        if (time !== null && used !== null && used > time) {
+            cr.setSourceRGBA(...NOTCH_RGBA);
+            cr.rectangle(width * time - NOTCH_WIDTH / 2, 0, NOTCH_WIDTH, height);
+            cr.fill();
+        } else if (time !== null && time > 0) {
+            // Inset by half its width so the whole line lands inside the bar.
             const line = 1;
             cr.setSourceRGBA(...FRAME_RGBA);
             cr.setLineWidth(line);
