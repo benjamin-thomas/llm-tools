@@ -16,7 +16,8 @@
 #    agent can plant code there that runs outside the next time the user
 #    invokes ruby, node, claude... on the host. Fix: toolchains ro, libraries
 #    installed per project (vendor/bundle, node_modules). Done for Haskell:
-#    ~/.ghcup and ~/.config/cabal are always read-only (host_toolchain_paths).
+#    a launch mounting ~/.ghcup or ~/.config/cabal writable is refused
+#    (host_toolchain_paths).
 #
 # 2. Dev servers may run on the host. Some dev setups start their servers in a
 #    host terminal, from source and node_modules the agent writes: the same
@@ -723,8 +724,8 @@ module SandboxLib
   ]
 
   # Compilers the host builds with: a sandbox that rewrote one would plant code
-  # in whatever the host compiles next. Mounted read-only whatever a project
-  # declares; libraries stay writable in their own stores (~/.local/state/cabal).
+  # in whatever the host compiles next. A launch mounting one writable is
+  # refused; libraries stay writable in their own stores (~/.local/state/cabal).
   def host_toolchain_paths(home) = [
     "#{home}/.ghcup",
     "#{home}/.config/cabal",
@@ -811,12 +812,19 @@ module SandboxLib
       end
     end
 
+    writable_flags = %w[--bind --dev-bind --bind-try --dev-bind-try]
     host_toolchain_paths(home).each do |tool|
+      # A writable bind of the tool, of a parent or of a part of it, unless a later
+      # read-only bind covers that very spot.
       writable = args.each_with_index.any? do |arg, i|
-        %w[--bind --dev-bind --bind-try --dev-bind-try].include?(arg) &&
-          exposes?(args[i + 1], tool) && effective_bind(args, tool) != "--ro-bind"
+        next false unless writable_flags.include?(arg) && exposes?(args[i + 1], tool)
+
+        spot = args[i + 2].start_with?(File.join(tool, "")) ? args[i + 2] : tool
+        writable_flags.include?(effective_bind(args, spot))
       end
-      violations << "#{tool} is writable: the host compiles with it" if writable
+      next unless writable
+
+      violations << "#{tool} is writable: the host compiles with it. Declare ro:#{tool.sub(home, '~')} in .sandbox-mounts"
     end
 
     args.each_cons(2) do |flag, name|
@@ -1225,12 +1233,6 @@ module SandboxLib
       when *NETWORK_MODES then nil # opened by sandbox-agent, see sandbox-network.rb
       else warn "Unknown mount mode '#{mount[:mode]}' in .sandbox-mounts: #{mount[:line]}"
       end
-    end
-
-    # --- host toolchains read-only, after .sandbox-mounts so a rw line cannot win ---
-    host_toolchain_paths(home).each do |tool|
-      declared = declared_mounts.any? { |m| %w[ro rw].include?(m[:mode]) && exposes?(m[:path], tool) }
-      args.push(*ro(tool)) if declared && File.exist?(tool)
     end
 
     # --- no SSH, last word ---

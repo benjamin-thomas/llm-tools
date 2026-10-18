@@ -26,22 +26,36 @@ class SandboxAgentsTest < Minitest::Test
   end
 
   # The host compiles with this GHC and cabal config: a project asking for them
-  # rw still starts, with both read-only. Its store stays writable.
-  def test_haskell_toolchain_is_mounted_read_only_even_when_declared_rw
+  # rw is refused, with what to declare instead. Its store may stay writable.
+  def test_haskell_toolchain_declared_rw_is_refused
     Dir.mktmpdir("agents-home-") do |home|
       FileUtils.touch(File.join(home, ".gitconfig")) # required by a launch
-      ghcup = File.join(home, ".ghcup")
-      cabal_config = File.join(home, ".config", "cabal")
-      cabal_store = File.join(home, ".local", "state", "cabal")
-      [ghcup, cabal_config, cabal_store].each { |dir| FileUtils.mkdir_p(dir) }
+      %w[.ghcup .config/cabal .local/state/cabal].each { |dir| FileUtils.mkdir_p(File.join(home, dir)) }
       Dir.mktmpdir("agents-project-") do |project|
         File.write(File.join(project, ".sandbox-mounts"),
                    "rw:~/.ghcup\nrw:~/.config/cabal\nrw:~/.local/state/cabal\n")
         with_home(home) do
           args = SandboxLib.build_base_args(project, git_rw: false)
-          assert_equal "--ro-bind", SandboxLib.effective_bind(args, ghcup)
-          assert_equal "--ro-bind", SandboxLib.effective_bind(args, cabal_config)
-          assert_equal "--bind", SandboxLib.effective_bind(args, cabal_store)
+          violations = SandboxLib.invariant_violations(args, home: home, uid: Process.uid)
+          assert(violations.any? { |v| v.include?("ro:~/.ghcup") })
+          assert(violations.any? { |v| v.include?("ro:~/.config/cabal") })
+          refute(violations.any? { |v| v.include?(".local/state/cabal") })
+        end
+      end
+    end
+  end
+
+  def test_haskell_toolchain_declared_ro_passes_with_a_writable_store
+    Dir.mktmpdir("agents-home-") do |home|
+      FileUtils.touch(File.join(home, ".gitconfig")) # required by a launch
+      %w[.ghcup .config/cabal .local/state/cabal].each { |dir| FileUtils.mkdir_p(File.join(home, dir)) }
+      Dir.mktmpdir("agents-project-") do |project|
+        File.write(File.join(project, ".sandbox-mounts"),
+                   "ro:~/.ghcup\nro:~/.config/cabal\nrw:~/.local/state/cabal\n")
+        with_home(home) do
+          args = SandboxLib.build_base_args(project, git_rw: false)
+          violations = SandboxLib.invariant_violations(args, home: home, uid: Process.uid)
+          refute(violations.any? { |v| v.include?("ghcup") || v.include?("cabal") })
         end
       end
     end
