@@ -27,6 +27,18 @@ class EndpointsTest < Minitest::Test
     assert_empty SandboxNetwork.only_ip(SandboxNetwork.parse_endpoints("127.5.0.0/29:5432"), "127.9.9.9")
   end
 
+  # Node reads no CIDR in NO_PROXY: 127.0.0.0/8 does not cover the session's
+  # own address, which its scripts would then send to the proxy.
+  def test_no_proxy_names_the_sessions_own_address
+    env = SandboxNetwork.no_proxy_env("127.5.0.3")
+    assert_equal "#{SandboxNetwork::NO_PROXY},127.5.0.3", env["NO_PROXY"]
+    assert_equal env["NO_PROXY"], env["no_proxy"]
+  end
+
+  def test_no_proxy_without_an_address_is_the_default
+    assert_equal SandboxNetwork::NO_PROXY, SandboxNetwork.no_proxy_env(nil)["NO_PROXY"]
+  end
+
   def test_only_ip_wants_an_address
     assert_raises(ArgumentError) { SandboxNetwork.only_ip([], "127.5.0.0/29") }
   end

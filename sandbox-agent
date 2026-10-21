@@ -532,7 +532,7 @@ File.write(net_info, SandboxNetwork.info_text(
   log_path: net_log
 ))
 File.write(net_info, "\nhost: and expose: doors narrowed to #{flags[:only_ip]} (--ip).\n", mode: "a") if flags[:only_ip]
-net.env.each { |key, value| args.push("--setenv", key, value) }
+net.env.merge(SandboxNetwork.no_proxy_env(flags[:only_ip])).each { |key, value| args.push("--setenv", key, value) }
 args.push("--setenv", "SANDBOX_NETWORK_INFO", net_info,
           "--setenv", "SANDBOX_NETWORK_LOG", net_log)
 cmd = net.wrap(cmd)

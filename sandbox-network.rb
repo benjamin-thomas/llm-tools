@@ -88,6 +88,13 @@ module SandboxNetwork
     endpoints.select { |addr, _port| addr == ip }
   end
 
+  # Node reads no CIDR in NO_PROXY, so the session's own address (--ip) is
+  # named: its scripts reach its servers directly, not through the proxy.
+  def no_proxy_env(ip)
+    value = ip ? "#{NO_PROXY},#{ip}" : NO_PROXY
+    { "NO_PROXY" => value, "no_proxy" => value }
+  end
+
   def resolve(name)
     Addrinfo.getaddrinfo(name, nil, nil, :STREAM).map(&:ip_address).uniq
   rescue SocketError
