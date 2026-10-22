@@ -35,6 +35,7 @@
 
 require "digest"
 require "fileutils"
+require "json"
 require "open3"
 require "shellwords"
 
@@ -731,6 +732,11 @@ module SandboxLib
     "#{home}/.config/cabal",
   ]
 
+  # Caches under the writable ~/.cache that the host runs code from: opencode
+  # reuses the npm packages it installed there (formatters, plugins) with no
+  # integrity check. Each is hidden behind a private tmpfs.
+  def host_code_caches(home) = ["#{home}/.cache/opencode"]
+
   FORBIDDEN_ENV = %w[SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS GPG_AGENT_INFO].freeze
 
   BIND_FLAGS = %w[--bind --ro-bind --dev-bind --bind-try --ro-bind-try --dev-bind-try].freeze
@@ -833,6 +839,10 @@ module SandboxLib
     host_daemon_dirs(home).each do |dir|
       flag = effective_mount(args, dir)
       violations << "#{dir} is reachable (#{flag}): its daemon runs commands on the host" if BIND_FLAGS.include?(flag)
+    end
+    host_code_caches(home).each do |dir|
+      flag = effective_mount(args, dir)
+      violations << "#{dir} is writable: the host runs code from it" if writable_flags.include?(flag)
     end
 
     # See "Git write access" above.
@@ -1015,13 +1025,27 @@ module SandboxLib
     args.push(*rw(agents_dir)) if File.directory?(agents_dir)
     opencode_cfg = "#{home}/.config/opencode"
     opencode_data = "#{home}/.local/share/opencode"
-    # ~/.local/state/opencode holds runtime locks/state and falls under the ro
-    # ~/.local mount above — overlay it rw or opencode crashes with EROFS trying to
-    # create its lock files (mkdir .../locks/<hash>.lock).
     opencode_state = "#{home}/.local/state/opencode"
-    args.push(*rw(opencode_cfg))   if File.directory?(opencode_cfg)
-    args.push(*rw(opencode_data))  if File.directory?(opencode_data)
-    args.push(*rw(opencode_state)) if File.directory?(opencode_state)
+    # The binary (V2 installs to ~/.opencode/bin). Read-only, always: the host
+    # runs this very binary, so an agent that could write it would run code
+    # outside the sandbox the next time opencode starts on the host. Its bin/
+    # goes on PATH below so `opencode` resolves, like grok's.
+    opencode_dir = "#{home}/.opencode"
+    args.push(*ro(opencode_dir)) if File.directory?(opencode_dir)
+    # OpenCode V2's host background service and TUI auto-load plugins from its
+    # config dir: writable from a sandbox, a plugin is code execution outside
+    # it, the same escape the mux sockets guard against. Config, agents and
+    # herdr's integration files all load fine read-only.
+    args.push(*ro(opencode_cfg)) if File.directory?(opencode_cfg)
+    # The service registration, the session DB and the remembered-model state
+    # (model.json) never cross a sandbox boundary: a sandbox session that saw
+    # them would overwrite the host's registration and contend for its DB.
+    # tmpfs keeps both writable — opencode crashes with EROFS creating its
+    # lock files otherwise (mkdir .../locks/<hash>.lock) — while the session's
+    # data stays ephemeral. sandbox-agent mounts a data dir seeded with the
+    # credentials over this one: see seed_opencode_data.
+    args.push("--tmpfs", opencode_data) if File.directory?(opencode_data)
+    args.push("--tmpfs", opencode_state) if File.directory?(opencode_state)
     # pi: ~/.pi holds config/auth plus runtime state (sessions, logs), all written
     # at runtime — mount rw. pi is yolo by default.
     pi_dir = "#{home}/.pi"
@@ -1178,6 +1202,14 @@ module SandboxLib
 
     cache_dir = "#{home}/.cache"
     args.push(*rw(cache_dir))    if File.directory?(cache_dir)
+    # Created first, like HOST_DAEMON_DIRS: one created by a sandbox, through
+    # the writable ~/.cache, is the one the host would then run code from.
+    host_code_caches(home).each do |dir|
+      next unless File.directory?(cache_dir)
+
+      FileUtils.mkdir_p(dir)
+      args.push("--tmpfs", dir)
+    end
     pictures_dir = "#{home}/Pictures"
     args.push(*ro(pictures_dir)) if File.directory?(pictures_dir)
     args.push(*rw(project_dir))
@@ -1272,6 +1304,7 @@ module SandboxLib
       *(File.directory?(moon_dir) ? ["#{moon_dir}/bin"] : []),
       *(File.directory?("#{kimi_code_dir}/bin") ? ["#{kimi_code_dir}/bin"] : []),
       *(File.directory?("#{grok_dir}/bin") ? ["#{grok_dir}/bin"] : []),
+      *(File.directory?("#{opencode_dir}/bin") ? ["#{opencode_dir}/bin"] : []),
       *(File.directory?("#{asdf_dir}/shims") ? ["#{asdf_dir}/shims"] : []),
       *(go_paths ? [go_paths[:root], go_paths[:path]].compact.map { |d| "#{d}/bin" } : []),
       *(File.directory?("#{bun_dir}/bin") ? ["#{bun_dir}/bin"] : []),
@@ -1303,6 +1336,30 @@ module SandboxLib
     args
   end
 
+
+  # opencode keeps its credentials in its database, and imports auth.json only
+  # into a database it migrates, never into one it creates — so a sandbox's
+  # fresh one would hold none, and offer no model. The host's opencode copies
+  # its provider credentials into a data dir under `dir` instead, through a
+  # pipe, never argv; its MCP logins stay behind, no MCP server being reachable
+  # from a sandbox. Returns that data dir, or nil.
+  def seed_opencode_data(dir, opencode: File.join(Dir.home, ".opencode", "bin", "opencode"))
+    return unless File.executable?(opencode)
+
+    exported, err, status = Open3.capture3("timeout", "20", opencode, "auth", "export", "--standalone")
+    return warn("opencode credentials not seeded: #{err.strip}") unless status.success?
+
+    credentials = JSON.parse(exported).reject { |credential| credential["integrationID"].to_s.start_with?("mcp_") }
+    xdg = File.join(dir, "opencode")
+    env = { "XDG_DATA_HOME" => File.join(xdg, "data"), "XDG_STATE_HOME" => File.join(xdg, "state") }
+    _, err, status = Open3.capture3(env, "timeout", "20", opencode, "auth", "import", "--standalone",
+                                    stdin_data: JSON.generate(credentials))
+    return warn("opencode credentials not seeded: #{err.strip}") unless status.success?
+
+    File.join(xdg, "data", "opencode")
+  rescue JSON::ParserError => e
+    warn("opencode credentials not seeded: #{e.message}")
+  end
 
   # Run bwrap as a child instead of exec()ing it. exec() replaces this process
   # image, so no ensure hook fires and a caller's temp dir — with a live

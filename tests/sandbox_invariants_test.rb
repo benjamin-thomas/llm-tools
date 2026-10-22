@@ -149,6 +149,16 @@ class SandboxInvariantsTest < Minitest::Test
     refute_empty violations(base + rw("#{@home}/.config/cabal"))
   end
 
+  # Host opencode runs the npm packages it finds under its cache, unchecked.
+  def test_what_opencode_runs_from_its_cache_is_never_writable
+    refute_empty violations(base + rw("#{@home}/.cache") + hide_daemons)
+    refute_empty violations(base + ["--tmpfs", "#{@home}/.cache/opencode"] + rw("#{@home}/.cache") + hide_daemons)
+  end
+
+  def test_the_rest_of_the_cache_may_be_writable_with_opencode_hidden
+    assert_empty violations(base + rw("#{@home}/.cache") + ["--tmpfs", "#{@home}/.cache/opencode"] + hide_daemons)
+  end
+
   def test_haskell_toolchain_may_be_read
     assert_empty violations(base + ro("#{@home}/.ghcup") + ro("#{@home}/.config/cabal") + hide_daemons)
   end

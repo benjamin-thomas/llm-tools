@@ -74,4 +74,62 @@ class SandboxAgentsTest < Minitest::Test
       end
     end
   end
+
+  def test_opencode_cache_is_private_even_before_the_host_creates_it
+    Dir.mktmpdir("agents-home-") do |home|
+      FileUtils.touch(File.join(home, ".gitconfig")) # required by a launch
+      Dir.mkdir(File.join(home, ".cache"))
+      Dir.mktmpdir("agents-project-") do |project|
+        with_home(home) do
+          args = SandboxLib.build_base_args(project, git_rw: false)
+          assert_equal "--tmpfs", SandboxLib.effective_mount(args, File.join(home, ".cache", "opencode"))
+        end
+      end
+    end
+  end
+
+  # Stands in for the host's opencode: exports two credentials, imports into
+  # its XDG data dir what it reads.
+  FAKE_OPENCODE = <<~SH
+    #!/bin/sh
+    case "$1 $2" in
+      "auth export") [ -n "$FAIL" ] && exit 1
+                     echo '[{"integrationID":"mistral","value":{}},{"integrationID":"mcp_1","value":{}}]' ;;
+      "auth import") mkdir -p "$XDG_DATA_HOME/opencode" && cat > "$XDG_DATA_HOME/opencode/imported" ;;
+    esac
+  SH
+
+  def with_fake_opencode
+    Dir.mktmpdir("agents-opencode-") do |dir|
+      opencode = File.join(dir, "opencode")
+      File.write(opencode, FAKE_OPENCODE)
+      FileUtils.chmod(0o755, opencode)
+      Dir.mktmpdir("agents-session-") { |session| yield opencode, session }
+    end
+  end
+
+  # Its MCP logins stay on the host: none is reachable from a sandbox.
+  def test_opencode_data_is_seeded_with_the_host_provider_credentials
+    with_fake_opencode do |opencode, session|
+      data = SandboxLib.seed_opencode_data(session, opencode: opencode)
+      imported = JSON.parse(File.read(File.join(data, "imported")))
+      assert_equal %w[mistral], imported.map { |credential| credential["integrationID"] }
+      assert data.start_with?(File.join(session, ""))
+    end
+  end
+
+  def test_opencode_data_is_not_seeded_when_the_export_fails
+    with_fake_opencode do |opencode, session|
+      ENV["FAIL"] = "1"
+      assert_nil SandboxLib.seed_opencode_data(session, opencode: opencode)
+    ensure
+      ENV.delete("FAIL")
+    end
+  end
+
+  def test_opencode_data_is_not_seeded_without_opencode
+    Dir.mktmpdir("agents-session-") do |session|
+      assert_nil SandboxLib.seed_opencode_data(session, opencode: File.join(session, "missing"))
+    end
+  end
 end

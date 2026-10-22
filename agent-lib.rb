@@ -13,27 +13,33 @@ require "shellwords"
 module AgentCatalog
   module_function
 
-  # Neither vibe nor opencode, though both run in a sandbox. The scripts that
-  # pick agents here drive them through herdr, which detects no vibe agent
-  # (none in 0.9.3): `herdr agent prompt` and `wait` cannot reach one.
-  #
-  # opencode's TUI cannot be started at a reasoning effort, two bugs together.
-  # Do not offer it again while both stand:
-  #   - it takes no --variant; only `opencode run` does (anomalyco/opencode#7354,
-  #     closed unfixed, PR #7358 unmerged);
+  # Neither vibe (herdr detects no vibe agent, none in 0.9.3: `herdr agent
+  # prompt` and `wait` cannot reach one) nor opencode's full TUI. The TUI is
+  # fine interactively, and no less safe in a sandbox than mini — same binary,
+  # same mounts — but it cannot be started at a pinned model and effort, which
+  # is this catalog's contract:
+  #   - it takes no --model or --variant flag (anomalyco/opencode#7354, closed
+  #     unfixed, PR #7358 unmerged);
   #   - a variant configured for an agent does not reach it either
-  #     (anomalyco/opencode#7138, then #22065, closed not planned; PR #7156).
-  # It starts on the variant it remembers per model, in a state file every
-  # sandbox shares: two sessions starting one model at two efforts would run
-  # one at the wrong effort, silently. pi reaches the same providers.
-  HARNESSES = %w[claude codex grok pi].freeze
+  #     (anomalyco/opencode#7138, then #22065, closed not planned; PR #7156);
+  #   - it starts on the variant it remembers per model, in model.json — the
+  #     host's copy shared by its own sessions, and a sandbox's copy empty, so
+  #     a fresh sandbox session would run the model default, not the picked
+  #     effort.
+  # opencode therefore runs as `opencode mini`, whose --model takes
+  # provider/model#variant (verified on v2.1.3): the flag pins the effort. An
+  # unknown #variant falls back to the model default silently, so the variant
+  # lists here come from the model catalog. Switch this entry to the TUI when
+  # its root command grows a startup model/variant flag — until then, mini
+  # only.
+  HARNESSES = %w[claude codex grok opencode pi].freeze
   SPEC = %r{\A([a-z]+):([A-Za-z0-9][A-Za-z0-9._/\[\]-]*):([a-z]+)\z}
 
   CLAUDE_MODELS = %w[opus fable sonnet haiku].freeze
   CLAUDE_EFFORTS = %w[low medium high xhigh max].freeze
   PI_THINKING = %w[off minimal low medium high xhigh max].freeze
 
-  CLEAR = { "pi" => "/new" }.freeze
+  CLEAR = { "opencode" => "/new", "pi" => "/new" }.freeze
 
   # The real host: listings time out rather than hang a start.
   class Host
@@ -80,6 +86,7 @@ module AgentCatalog
   def models(harness, host)
     case harness
     when "claude" then CLAUDE_MODELS.map { |model| [model, CLAUDE_EFFORTS] }
+    when "opencode" then AgentCatalog.opencode_models(host.capture("opencode", "api", "get", "/api/model"))
     when "codex" then AgentCatalog.codex_models(host.capture("codex", "debug", "models"))
     when "grok" then AgentCatalog.grok_models(host.capture("grok", "models"))
     when "pi"
@@ -102,6 +109,12 @@ module AgentCatalog
          -c check_for_update_on_startup=false]
     when "grok" then %W[grok --yolo -m #{model} --reasoning-effort #{effort}]
     when "pi" then %W[pi --model #{model} --thinking #{effort}]
+    when "opencode"
+      # mini, not the TUI: only mini takes the #variant (see the header). The
+      # inline CLI config auto-accepts permissions — the sandbox is the
+      # boundary, as for the other harnesses.
+      %W[env OPENCODE_CLI_CONFIG_CONTENT={"session":{"permissions":"autoaccept"}} opencode mini --standalone
+         --model #{model}##{effort}]
     end
   end
 
@@ -122,6 +135,18 @@ module AgentCatalog
     text.scan(/^\s*[*-]\s+(\S+)/).flatten.map do |model|
       [model, model == "grok-4.5" ? %w[low medium high] : %w[low medium high xhigh]]
     end
+  end
+
+  # /api/model lists every model with its variant ids, which are the efforts.
+  def opencode_models(json)
+    rows = JSON.parse(json)
+    rows = rows.is_a?(Hash) ? (rows["models"] || rows["data"] || []) : rows
+    rows.filter_map do |row|
+      efforts = (row["variants"] || []).map { |v| v.is_a?(Hash) ? v["id"] : v }.compact.uniq
+      ["#{row['providerID']}/#{row['id']}", efforts] unless efforts.empty?
+    end
+  rescue JSON::ParserError
+    []
   end
 
   def pi_settings = File.join(ENV["PI_CODING_AGENT_DIR"] || File.join(Dir.home, ".pi", "agent"), "settings.json")

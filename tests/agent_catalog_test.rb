@@ -91,11 +91,31 @@ class AgentCatalogTest < Minitest::Test
   end
 
   # Installed, still not offered: see HARNESSES.
-  def test_vibe_and_opencode_are_not_offered
-    host = FakeHost.new(installed: %w[vibe opencode],
-                        outputs: { %w[opencode models --verbose] => "hyper/glm-5.3\n{\"capabilities\": {\"reasoning\": true, \"toolcall\": true, \"output\": {\"text\": true}}\n}\n" },
+  def test_vibe_is_not_offered
+    host = FakeHost.new(installed: %w[vibe],
                         files: { File.join(Dir.home, ".vibe", "config.toml") => "active_model = \"glm-5-3\"\n" })
     assert_empty lines(host)
+  end
+
+  def opencode_host(listing)
+    FakeHost.new(installed: %w[opencode], outputs: { %w[opencode api get /api/model] => listing })
+  end
+
+  # A model without variants takes no effort, so the catalog cannot pin one.
+  def test_opencode_offers_its_models_at_their_variants
+    host = opencode_host(JSON.generate("data" => [
+      { "id" => "zai-glm-5-3", "providerID" => "mistral", "variants" => [{ "id" => "low" }, { "id" => "high" }] },
+      { "id" => "plain", "providerID" => "hyper", "variants" => [] }
+    ]))
+    assert_equal %w[opencode:mistral/zai-glm-5-3:low opencode:mistral/zai-glm-5-3:high], specs(host)
+    assert_includes lines(host),
+                    "opencode:mistral/zai-glm-5-3:high\t/new\tenv " \
+                    "OPENCODE_CLI_CONFIG_CONTENT\\=\\{\\\"session\\\":\\{\\\"permissions\\\":\\\"autoaccept\\\"\\}\\} " \
+                    "opencode mini --standalone --model mistral/zai-glm-5-3\\#high"
+  end
+
+  def test_opencode_offers_nothing_when_its_listing_fails
+    assert_empty lines(opencode_host("not json"))
   end
 
   def pi_host(settings = nil)

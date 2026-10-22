@@ -55,8 +55,9 @@
 #
 # Still granted, for the record: the CLIPBOARD selection through the bridge
 # (an agent can read whatever you copy there, at any time — set
-# PASSWORD_STORE_X_SELECTION=primary to keep `pass -c` out of it), ~/.cache rw,
-# ~/.local ro, audio devices, the project dir rw.
+# PASSWORD_STORE_X_SELECTION=primary to keep `pass -c` out of it), ~/.cache rw
+# bar the caches the host runs code from (host_code_caches), ~/.local ro, audio
+# devices, the project dir rw.
 
 require "fileutils"
 require "json"
@@ -384,6 +385,9 @@ runtime_dir = ENV["XDG_RUNTIME_DIR"]
 runtime_dir = nil unless runtime_dir && File.directory?(runtime_dir)
 socket_dir = Dir.mktmpdir("sandbox-agent-", runtime_dir)
 args.push(*rw(socket_dir))
+
+opencode_data = SandboxLib.seed_opencode_data(socket_dir)
+args.push(*rw(opencode_data, File.join(home, ".local", "share", "opencode"))) if opencode_data
 
 case flags[:mux]
 when "tmux"
