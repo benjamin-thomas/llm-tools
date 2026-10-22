@@ -69,6 +69,12 @@ or clearing the source, or closing its owner, cancels pending transfers.
 Transfers are limited to 64 MiB of buffered data overall and 5 seconds without
 progress.
 
+The private screen tells its apps nothing of the host's density. Each session
+gets `BROWSER_SCALE`, for a project's browser tools to pass to Chrome
+(`--force-device-scale-factor`): 2 when every host screen is HiDPI (a laptop
+panel alone), 1 once an ordinary monitor is plugged in, from `xrandr` at the
+session's start. `BROWSER_SCALE` set where `sandbox-agent` runs forces it.
+
 Existing sessions must be stopped and relaunched with `sandbox-agent` to load
 changes to the relay. Reattaching to a multiplexer or restarting only the agent
 does not replace the session's host-side relay. No desktop restart is needed.

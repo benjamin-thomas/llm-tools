@@ -497,6 +497,9 @@ at_exit { SandboxX11.stop_screen(screen) }
 args.push(*ro("/tmp/.X11-unix/X#{screen.display.delete(":")}"),
           "--setenv", "DISPLAY", screen.display,
           "--setenv", "XAUTHORITY", screen.auth)
+# Yours wins: BROWSER_SCALE in this environment forces it.
+scale = ENV["BROWSER_SCALE"] || SandboxX11.host_browser_scale
+args.push("--setenv", "BROWSER_SCALE", scale) if scale
 SandboxX11.watch_screen(screen) if screen.window
 clipboard_pid = SandboxX11.start_clipboard(screen)
 at_exit { SandboxX11.stop_clipboard(clipboard_pid) } if clipboard_pid

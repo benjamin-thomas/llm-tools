@@ -198,6 +198,35 @@ module SandboxX11
 
   def screen_env(screen) = { "DISPLAY" => screen.display, "XAUTHORITY" => screen.auth }
 
+  # --- The browser's scale ----------------------------------------------------
+  #
+  # The private screen tells nothing of the host's density: a browser drawn in
+  # it at scale 1 is tiny on a HiDPI panel. BROWSER_SCALE, which a project's
+  # browser tools pass to Chrome, follows the host's least dense screen: 2 on a
+  # laptop panel alone, 1 once an ordinary monitor is plugged in.
+  HIDPI = 170
+
+  # `xrandr --query` → "2", "1", or nil when no screen gives its physical size.
+  # The longest sides: a rotated screen keeps its size in millimetres unrotated.
+  def browser_scale(xrandr)
+    dpis = xrandr.scan(/^\S+ connected .*?(\d+)x(\d+)\+\d+\+\d+.* (\d+)mm x (\d+)mm$/).filter_map do |w, h, w_mm, h_mm|
+      mm = [w_mm.to_i, h_mm.to_i].max
+      [w.to_i, h.to_i].max * 25.4 / mm if mm.positive?
+    end
+    return nil if dpis.empty?
+
+    dpis.min >= HIDPI ? "2" : "1"
+  end
+
+  def host_browser_scale
+    return nil unless ENV["DISPLAY"]
+
+    out, status = Open3.capture2("xrandr", "--query", err: File::NULL)
+    status.success? ? browser_scale(out) : nil
+  rescue SystemCallError
+    nil
+  end
+
   # --onlyvisible: the window must be mapped before stow_window, or the window
   # manager ignores the minimize request and maps it in plain view anyway.
   def find_window(token)

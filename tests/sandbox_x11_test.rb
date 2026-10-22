@@ -74,3 +74,25 @@ class XauthEntryTest < Minitest::Test
     assert_empty rest
   end
 end
+
+class BrowserScaleTest < Minitest::Test
+  LAPTOP = "eDP connected primary 2880x1800+0+0 (normal left inverted right x axis y axis) 300mm x 190mm\n"
+  MONITOR = "HDMI-1 connected 2560x1440+2880+0 (normal left inverted right x axis y axis) 597mm x 336mm\n"
+
+  def test_a_laptop_panel_alone_draws_at_scale_2
+    assert_equal "2", SandboxX11.browser_scale("Screen 0: minimum 320 x 200\n#{LAPTOP}  2880x1800 60.00*+\n")
+  end
+
+  def test_an_ordinary_monitor_plugged_in_brings_it_to_1
+    assert_equal "1", SandboxX11.browser_scale(LAPTOP + MONITOR)
+  end
+
+  def test_a_rotated_panel_keeps_its_density
+    assert_equal "2", SandboxX11.browser_scale("eDP connected 1800x2880+0+0 left (normal left inverted right) 300mm x 190mm\n")
+  end
+
+  def test_without_a_physical_size_it_says_nothing
+    assert_nil SandboxX11.browser_scale("Virtual-1 connected primary 1920x1080+0+0 (normal) 0mm x 0mm\n")
+    assert_nil SandboxX11.browser_scale("HDMI-1 disconnected (normal left inverted right x axis y axis)\n")
+  end
+end
