@@ -12,7 +12,7 @@ The footer shows **token-weighted averages** for the last 1 minute, 10 minutes, 
 pi install /home/benjamin/code/github.com/benjamin-thomas/llm-tools/pi-tps
 ```
 
-Or add a packages entry next to `pi-orchestrator` in `~/.pi/agent/settings.json`.
+Or add a packages entry in `~/.pi/agent/settings.json`.
 
 ## Use
 
