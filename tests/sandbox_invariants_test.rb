@@ -32,6 +32,8 @@ class SandboxInvariantsTest < Minitest::Test
   # What a real launch adds over ~/.local and friends: see HOST_DAEMON_DIRS.
   def hide_daemons = SandboxLib.host_daemon_dirs(@home).flat_map { |dir| ["--tmpfs", dir] }
 
+  def hide_keyring = ["--tmpfs", SandboxLib.keyring_files(@home)]
+
   def test_minimal_args_pass
     assert_empty violations(base)
   end
@@ -62,6 +64,20 @@ class SandboxInvariantsTest < Minitest::Test
 
   def test_session_dbus_socket_is_refused
     refute_empty violations(base + ro("/run/user/#{UID}/bus"))
+  end
+
+  # Encrypted, but a gnome-keyring started inside would unlock it for the agent
+  # once given the login password.
+  def test_keyring_files_are_refused
+    local = base + ro("#{@home}/.local") + hide_daemons
+    refute_empty violations(local)
+    assert_empty violations(local + hide_keyring)
+  end
+
+  # A private bus started inside would activate gnome-keyring from these.
+  def test_keyring_activation_is_refused
+    refute_empty violations(base + ro("/usr"))
+    assert_empty violations(base + ro("/usr") + SandboxLib::KEYRING_SERVICES.flat_map { |service| mask(service) })
   end
 
   def test_docker_socket_is_refused
@@ -192,7 +208,7 @@ class SandboxInvariantsTest < Minitest::Test
   end
 
   def test_a_hidden_host_daemon_socket_dir_passes
-    assert_empty violations(base + ro("#{@home}/.local") + hide_daemons)
+    assert_empty violations(base + ro("#{@home}/.local") + hide_daemons + hide_keyring)
   end
 
   def test_violation_names_the_path

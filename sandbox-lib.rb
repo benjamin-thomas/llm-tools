@@ -737,6 +737,24 @@ module SandboxLib
   # integrity check. Each is hidden behind a private tmpfs.
   def host_code_caches(home) = ["#{home}/.cache/opencode"]
 
+  # The login keyring, under the read-only ~/.local. Encrypted, but a
+  # gnome-keyring started inside (see KEYRING_SERVICES) would ask for the login
+  # password on the sandbox's screen — and once given, serve every secret in it
+  # to the agent.
+  def keyring_files(home) = "#{home}/.local/share/keyrings"
+
+  # With no session bus, a client wanting the Secret Service autolaunches a
+  # private one inside (DISPLAY is set), which starts gnome-keyring from these
+  # activation files. Masked, the bus answers "no such service" and the client
+  # does without a keyring (Chrome falls back to its basic store).
+  KEYRING_SERVICES = %w[
+    org.freedesktop.secrets
+    org.freedesktop.impl.portal.Secret
+    org.gnome.keyring
+    org.gnome.keyring.PrivatePrompter
+    org.gnome.keyring.SystemPrompter
+  ].map { |name| "/usr/share/dbus-1/services/#{name}.service" }.freeze
+
   FORBIDDEN_ENV = %w[SSH_AUTH_SOCK DBUS_SESSION_BUS_ADDRESS GPG_AGENT_INFO].freeze
 
   BIND_FLAGS = %w[--bind --ro-bind --dev-bind --bind-try --ro-bind-try --dev-bind-try].freeze
@@ -762,6 +780,20 @@ module SandboxLib
       flag = arg if path == dest || path.start_with?(File.join(dest, ""))
     end
     flag
+  end
+
+  # Is `path` visible inside: last covered by a bind that is not a mask?
+  def reachable?(args, path)
+    source = nil
+    args.each_with_index do |arg, i|
+      next unless BIND_FLAGS.include?(arg) || arg == "--tmpfs"
+
+      dest = arg == "--tmpfs" ? args[i + 1] : args[i + 2]
+      next unless path == dest || path.start_with?(File.join(dest, ""))
+
+      source = arg == "--tmpfs" ? nil : args[i + 1]
+    end
+    !source.nil? && source != "/dev/null"
   end
 
   # Git directories among the mounts: a mounted .git, or a mounted repository's.
@@ -843,6 +875,10 @@ module SandboxLib
     host_code_caches(home).each do |dir|
       flag = effective_mount(args, dir)
       violations << "#{dir} is writable: the host runs code from it" if writable_flags.include?(flag)
+    end
+    violations << "#{keyring_files(home)} is reachable: the login keyring" if reachable?(args, keyring_files(home))
+    KEYRING_SERVICES.each do |service|
+      violations << "#{service} is not masked: a bus inside would start gnome-keyring" if reachable?(args, service)
     end
 
     # See "Git write access" above.
@@ -1288,6 +1324,13 @@ module SandboxLib
 
       FileUtils.mkdir_p(dir)
       args.push("--tmpfs", dir)
+    end
+
+    # No keyring, last word too: see KEYRING_SERVICES.
+    KEYRING_SERVICES.each { |service| args.push(*mask(service)) if File.exist?(service) }
+    if File.directory?(File.dirname(keyring_files(home)))
+      FileUtils.mkdir_p(keyring_files(home))
+      args.push("--tmpfs", keyring_files(home))
     end
 
     # A private network: loopback only. The way out is the proxy sandbox-agent

@@ -34,6 +34,11 @@
 #   The gnome-keyring socket dir (/run/user/<uid>/keyring): same secrets, plus
 #   its ssh agent.
 #
+#   A gnome-keyring of its own: one started inside, on a bus autolaunched
+#   there, would ask for your login password on the sandbox's screen and unlock
+#   ~/.local/share/keyrings with it. Its D-Bus activation files are masked, the
+#   keyring files hidden (KEYRING_SERVICES in sandbox-lib.rb).
+#
 #   XDG_CURRENT_DESKTOP / XDG_SESSION_TYPE / DESKTOP_SESSION: their only job
 #   was helping Electron apps find an OS keyring, i.e. the thing above.
 #
