@@ -81,7 +81,7 @@ require_relative "sandbox-network"
 # multiplexer block below can keep calling ro/rw unqualified.
 include SandboxLib
 
-flags = { mux: "herdr", gui: true, write: false, setenv: [], git_write: false, shares: [] }
+flags = { mux: "herdr", gui: true, wm: true, write: false, setenv: [], git_write: false, shares: [] }
 
 # `doctor` is a subcommand, not a flag: it takes a project dir and no command.
 if (allow = ARGV.first == "allow")
@@ -131,6 +131,7 @@ parser = OptionParser.new do |opts|
           "Multiplexer for the sandboxed session: herdr (default) or tmux") { |mux| flags[:mux] = mux }
   opts.on("--[no-]gui", "Private Xephyr screen for GUI apps, e.g. Chrome (default: on).",
           "With --no-gui, Xvfb provides the clipboard without a window") { |gui| flags[:gui] = gui }
+  opts.on("--[no-]wm", "i3 on the private screen, when installed (default: on)") { |wm| flags[:wm] = wm }
   opts.on("--write", "doctor only: append the missing declarations it found") { flags[:write] = true }
   opts.on("--setenv PAIR", "Extra env var as KEY=VALUE (repeatable)") { |pair| flags[:setenv] << pair }
   opts.on("--git-write", "Let this session commit, without asking: config, hooks and",
@@ -512,6 +513,10 @@ args.push("--setenv", "BROWSER_SCALE", scale) if scale
 SandboxX11.watch_screen(screen) if screen.window
 clipboard_pid = SandboxX11.start_clipboard(screen)
 at_exit { SandboxX11.stop_clipboard(clipboard_pid) } if clipboard_pid
+if flags[:wm] && screen.window && File.executable?(SandboxX11::I3)
+  cmd = SandboxX11.with_i3(cmd, socket_dir)
+  args.push("--setenv", "SANDBOX_WM", "i3")
+end
 
 # --- private network ---
 #

@@ -2,6 +2,8 @@
 # Run: ruby tests/sandbox_x11_test.rb
 
 require "minitest/autorun"
+require "open3"
+require "tmpdir"
 require_relative "../sandbox-x11"
 
 class LocaluserGrantTest < Minitest::Test
@@ -94,5 +96,25 @@ class BrowserScaleTest < Minitest::Test
   def test_without_a_physical_size_it_says_nothing
     assert_nil SandboxX11.browser_scale("Virtual-1 connected primary 1920x1080+0+0 (normal) 0mm x 0mm\n")
     assert_nil SandboxX11.browser_scale("HDMI-1 disconnected (normal left inverted right x axis y axis)\n")
+  end
+end
+
+# Without a window manager, every window opens over the others at the top left.
+class WindowManagerTest < Minitest::Test
+  def test_i3_starts_in_front_of_the_command
+    Dir.mktmpdir("wm-") do |dir|
+      i3 = File.join(dir, "i3")
+      File.write(i3, "#!/bin/sh\necho \"$@\" > #{dir}/i3.args\n")
+      File.chmod(0o755, i3)
+
+      cmd = SandboxX11.with_i3(%w[echo herdr], dir, i3: i3)
+      out, status = Open3.capture2(*cmd)
+      sleep 0.1 until File.exist?("#{dir}/i3.args")
+
+      assert status.success?
+      assert_equal "herdr\n", out
+      assert_equal "-c #{dir}/i3.config\n", File.read("#{dir}/i3.args")
+      assert_match(/\A# i3 config file \(v4\)/, File.read("#{dir}/i3.config"))
+    end
   end
 end

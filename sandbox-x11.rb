@@ -227,6 +227,29 @@ module SandboxX11
     nil
   end
 
+  # --- The window manager -----------------------------------------------------
+  #
+  # Without one, every window opens at the top left, over the others: two
+  # Chromes hide each other. i3 tiles them side by side, and an agent can
+  # arrange them with i3-msg. It runs inside the sandbox, never on the host: an
+  # X client of the private screen can type into it (XTEST), and a host i3's
+  # `exec` bindings would run that outside.
+  I3 = "/usr/bin/i3"
+
+  # Its own config, not ~/.config/i3 (out of reach, and i3 would open its
+  # config wizard): no bindings, nothing it runs.
+  I3_CONFIG = <<~I3_CONFIG
+    # i3 config file (v4)
+    font pango:monospace 9
+  I3_CONFIG
+
+  # The command, i3 started in front of it on the sandbox's screen.
+  def with_i3(cmd, dir, i3: I3)
+    config = File.join(dir, "i3.config")
+    File.write(config, I3_CONFIG)
+    ["/bin/sh", "-c", "#{i3} -c \"$0\" >/dev/null 2>&1 & exec \"$@\"", config, *cmd]
+  end
+
   # --onlyvisible: the window must be mapped before stow_window, or the window
   # manager ignores the minimize request and maps it in plain view anyway.
   def find_window(token)

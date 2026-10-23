@@ -75,6 +75,10 @@ gets `BROWSER_SCALE`, for a project's browser tools to pass to Chrome
 panel alone), 1 once an ordinary monitor is plugged in, from `xrandr` at the
 session's start. `BROWSER_SCALE` set where `sandbox-agent` runs forces it.
 
+When i3 is installed, it runs inside the sandbox on the private screen, so
+windows tile instead of piling up at the top left; `SANDBOX_WM=i3` tells agents
+they can arrange them with `i3-msg`. `--no-wm` leaves it out.
+
 Existing sessions must be stopped and relaunched with `sandbox-agent` to load
 changes to the relay. Reattaching to a multiplexer or restarting only the agent
 does not replace the session's host-side relay. No desktop restart is needed.
