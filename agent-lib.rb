@@ -137,11 +137,18 @@ module AgentCatalog
     end
   end
 
-  # Whether a listed model can run a coding agent: providers also list
-  # embeddings, which call no tool, and speech models (Mistral lists both),
-  # whose context is far too short for an agent's session. Not their audio
-  # input: omni-modal coding models take audio too. What a row leaves out is
-  # not held against it.
+  # Whether a listed model can run a coding agent. Providers also list models
+  # that cannot: Mistral lists mistral-embed (embeddings, `tools: false`) and
+  # voxtral-small (speech, 32k context). Two obvious filters were tried and
+  # are wrong — do not go back to them:
+  #   - Offering only models with variants. It did hide Mistral's, which have
+  #     none, but also every real model without one, such as opencode's free
+  #     MiMo-V2.6-Flash and Big Pickle (those now come at OPENCODE_ONLY_EFFORT).
+  #   - Leaving out models that take audio. It hid voxtral, but MiMo too: it
+  #     is omni-modal (text, image, audio, video) and a fine coding model.
+  # What tells them apart is calling tools and the context size: the speech
+  # and embedding models sit at 32k or less, every coding model listed at
+  # 128k or more. A field a row leaves out is not held against it.
   def opencode_coding_model?(row)
     capabilities = row["capabilities"].is_a?(Hash) ? row["capabilities"] : {}
     context = row["limit"].is_a?(Hash) ? row["limit"]["context"] : nil
