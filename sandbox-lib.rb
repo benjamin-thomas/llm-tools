@@ -1073,6 +1073,10 @@ module SandboxLib
     # it, the same escape the mux sockets guard against. Config, agents and
     # herdr's integration files all load fine read-only.
     args.push(*ro(opencode_cfg)) if File.directory?(opencode_cfg)
+    # The config home of the user's opencode-free wrapper (agent-lib's
+    # opencode-free harness): the same plugins, so read-only for the same reason.
+    opencode_free_cfg = "#{home}/.config-free"
+    args.push(*ro(opencode_free_cfg)) if File.directory?(opencode_free_cfg)
     # The service registration, the session DB and the remembered-model state
     # (model.json) never cross a sandbox boundary: a sandbox session that saw
     # them would overwrite the host's registration and contend for its DB.

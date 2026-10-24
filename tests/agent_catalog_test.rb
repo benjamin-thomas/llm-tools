@@ -118,6 +118,23 @@ class AgentCatalogTest < Minitest::Test
     assert_empty lines(opencode_host("not json"))
   end
 
+  # opencode-free lists through its own wrapper, but starts opencode itself with
+  # the wrapper's config home and no OPENCODE_DB: the wrapper's DB path is
+  # read-only in a sandbox, and the sandbox's own opencode data dir is the
+  # writable one.
+  def test_opencode_free_is_a_harness_of_its_own_on_the_free_config
+    listing = JSON.generate("data" => [
+      { "id" => "glm-5.3-flash-free", "providerID" => "opencode", "variants" => [{ "id" => "high" }] }
+    ])
+    host = FakeHost.new(installed: %w[opencode-free], outputs: { %w[opencode-free api get /api/model] => listing })
+    assert_equal %w[opencode-free:opencode/glm-5.3-flash-free:high], specs(host)
+    assert_includes lines(host),
+                    "opencode-free:opencode/glm-5.3-flash-free:high\t/new\tenv " \
+                    "XDG_CONFIG_HOME=#{Dir.home}/.config-free " \
+                    "OPENCODE_CLI_CONFIG_CONTENT\\=\\{\\\"session\\\":\\{\\\"permissions\\\":\\\"autoaccept\\\"\\}\\} " \
+                    "opencode mini --standalone --model opencode/glm-5.3-flash-free\\#high"
+  end
+
   def pi_host(settings = nil)
     files = settings ? { File.join(Dir.home, ".pi", "agent", "settings.json") => JSON.generate(settings) } : {}
     FakeHost.new(installed: %w[pi], outputs: { PI_RPC => PI_MODELS }, files: files)

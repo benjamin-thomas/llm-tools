@@ -32,14 +32,18 @@ module AgentCatalog
   # lists here come from the model catalog. Switch this entry to the TUI when
   # its root command grows a startup model/variant flag — until then, mini
   # only.
-  HARNESSES = %w[claude codex grok opencode pi].freeze
-  SPEC = %r{\A([a-z]+):([A-Za-z0-9][A-Za-z0-9._/\[\]-]*):([a-z]+)\z}
+  HARNESSES = %w[claude codex grok opencode opencode-free pi].freeze
+  SPEC = %r{\A([a-z][a-z-]*):([A-Za-z0-9][A-Za-z0-9._/\[\]-]*):([a-z]+)\z}
 
   CLAUDE_MODELS = %w[opus fable sonnet haiku].freeze
   CLAUDE_EFFORTS = %w[low medium high xhigh max].freeze
   PI_THINKING = %w[off minimal low medium high xhigh max].freeze
 
-  CLEAR = { "opencode" => "/new", "pi" => "/new" }.freeze
+  CLEAR = { "opencode" => "/new", "opencode-free" => "/new", "pi" => "/new" }.freeze
+
+  # opencode on the config home of the user's `opencode-free` wrapper: the free
+  # models, without the zero-data-retention policies of the default config.
+  FREE_CONFIG_HOME = File.join(Dir.home, ".config-free")
 
   # The real host: listings time out rather than hang a start.
   class Host
@@ -87,6 +91,7 @@ module AgentCatalog
     case harness
     when "claude" then CLAUDE_MODELS.map { |model| [model, CLAUDE_EFFORTS] }
     when "opencode" then AgentCatalog.opencode_models(host.capture("opencode", "api", "get", "/api/model"))
+    when "opencode-free" then AgentCatalog.opencode_models(host.capture("opencode-free", "api", "get", "/api/model"))
     when "codex" then AgentCatalog.codex_models(host.capture("codex", "debug", "models"))
     when "grok" then AgentCatalog.grok_models(host.capture("grok", "models"))
     when "pi"
@@ -114,6 +119,12 @@ module AgentCatalog
       # inline CLI config auto-accepts permissions — the sandbox is the
       # boundary, as for the other harnesses.
       %W[env OPENCODE_CLI_CONFIG_CONTENT={"session":{"permissions":"autoaccept"}} opencode mini --standalone
+         --model #{model}##{effort}]
+    when "opencode-free"
+      # The wrapper's config home, but not its OPENCODE_DB: that path is
+      # read-only in a sandbox, whose own opencode data dir is the writable one.
+      %W[env XDG_CONFIG_HOME=#{FREE_CONFIG_HOME}
+         OPENCODE_CLI_CONFIG_CONTENT={"session":{"permissions":"autoaccept"}} opencode mini --standalone
          --model #{model}##{effort}]
     end
   end

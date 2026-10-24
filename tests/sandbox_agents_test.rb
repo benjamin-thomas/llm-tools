@@ -75,6 +75,22 @@ class SandboxAgentsTest < Minitest::Test
     end
   end
 
+  # agent-lib's opencode-free harness runs on this config home; like the
+  # default one, it loads plugins, so it is never writable from inside.
+  def test_opencode_free_config_home_is_read_only
+    Dir.mktmpdir("agents-home-") do |home|
+      FileUtils.touch(File.join(home, ".gitconfig")) # required by a launch
+      free = File.join(home, ".config-free")
+      FileUtils.mkdir_p(File.join(free, "opencode"))
+      Dir.mktmpdir("agents-project-") do |project|
+        with_home(home) do
+          args = SandboxLib.build_base_args(project, git_rw: false)
+          assert_equal "--ro-bind", SandboxLib.effective_bind(args, free)
+        end
+      end
+    end
+  end
+
   def test_opencode_cache_is_private_even_before_the_host_creates_it
     Dir.mktmpdir("agents-home-") do |home|
       FileUtils.touch(File.join(home, ".gitconfig")) # required by a launch
