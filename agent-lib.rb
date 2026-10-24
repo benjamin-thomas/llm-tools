@@ -45,6 +45,10 @@ module AgentCatalog
   # models, without the zero-data-retention policies of the default config.
   FREE_CONFIG_HOME = File.join(Dir.home, ".config-free")
 
+  # The effort of an opencode model with no variant: it has a single one, so
+  # there is nothing to pin, and it is started without a #variant.
+  OPENCODE_ONLY_EFFORT = "default"
+
   # The real host: listings time out rather than hang a start.
   class Host
     def installed?(command)
@@ -119,15 +123,18 @@ module AgentCatalog
       # inline CLI config auto-accepts permissions — the sandbox is the
       # boundary, as for the other harnesses.
       %W[env OPENCODE_CLI_CONFIG_CONTENT={"session":{"permissions":"autoaccept"}} opencode mini --standalone
-         --model #{model}##{effort}]
+         --model #{AgentCatalog.opencode_model(model, effort)}]
     when "opencode-free"
       # The wrapper's config home, but not its OPENCODE_DB: that path is
       # read-only in a sandbox, whose own opencode data dir is the writable one.
       %W[env XDG_CONFIG_HOME=#{FREE_CONFIG_HOME}
          OPENCODE_CLI_CONFIG_CONTENT={"session":{"permissions":"autoaccept"}} opencode mini --standalone
-         --model #{model}##{effort}]
+         --model #{AgentCatalog.opencode_model(model, effort)}]
     end
   end
+
+  # mini's --model: provider/model#variant, or bare for a model with no variant.
+  def opencode_model(model, effort) = effort == OPENCODE_ONLY_EFFORT ? model : "#{model}##{effort}"
 
   # The models codex's own picker shows.
   def codex_models(json)
@@ -154,7 +161,7 @@ module AgentCatalog
     rows = rows.is_a?(Hash) ? (rows["models"] || rows["data"] || []) : rows
     rows.filter_map do |row|
       efforts = (row["variants"] || []).map { |v| v.is_a?(Hash) ? v["id"] : v }.compact.uniq
-      ["#{row['providerID']}/#{row['id']}", efforts] unless efforts.empty?
+      ["#{row['providerID']}/#{row['id']}", efforts.empty? ? [OPENCODE_ONLY_EFFORT] : efforts]
     end
   rescue JSON::ParserError
     []

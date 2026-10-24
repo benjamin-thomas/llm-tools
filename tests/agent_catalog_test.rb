@@ -101,17 +101,23 @@ class AgentCatalogTest < Minitest::Test
     FakeHost.new(installed: %w[opencode], outputs: { %w[opencode api get /api/model] => listing })
   end
 
-  # A model without variants takes no effort, so the catalog cannot pin one.
+  # A model without variants has a single effort, so there is nothing to pin:
+  # it is offered at "default" and started without a #variant.
   def test_opencode_offers_its_models_at_their_variants
     host = opencode_host(JSON.generate("data" => [
       { "id" => "zai-glm-5-3", "providerID" => "mistral", "variants" => [{ "id" => "low" }, { "id" => "high" }] },
       { "id" => "plain", "providerID" => "hyper", "variants" => [] }
     ]))
-    assert_equal %w[opencode:mistral/zai-glm-5-3:low opencode:mistral/zai-glm-5-3:high], specs(host)
+    assert_equal %w[opencode:mistral/zai-glm-5-3:low opencode:mistral/zai-glm-5-3:high opencode:hyper/plain:default],
+                 specs(host)
     assert_includes lines(host),
                     "opencode:mistral/zai-glm-5-3:high\t/new\tenv " \
                     "OPENCODE_CLI_CONFIG_CONTENT\\=\\{\\\"session\\\":\\{\\\"permissions\\\":\\\"autoaccept\\\"\\}\\} " \
                     "opencode mini --standalone --model mistral/zai-glm-5-3\\#high"
+    assert_includes lines(host),
+                    "opencode:hyper/plain:default\t/new\tenv " \
+                    "OPENCODE_CLI_CONFIG_CONTENT\\=\\{\\\"session\\\":\\{\\\"permissions\\\":\\\"autoaccept\\\"\\}\\} " \
+                    "opencode mini --standalone --model hyper/plain"
   end
 
   def test_opencode_offers_nothing_when_its_listing_fails
