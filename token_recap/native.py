@@ -22,13 +22,22 @@ _CLAUDE: dict[str, tuple[float, float]] = {
     "sonnet": (2.0, 10.0),
     "haiku": (1.0, 5.0),
 }
+# A model priced off its family's card, matched by a part of its id. Claude
+# Opus 5.5 succeeded Opus 5 at a lower price, while Opus 5 is still served at
+# the family's.
+_CLAUDE_MODEL: dict[str, tuple[float, float]] = {
+    "opus-5-5": (4.0, 20.0),
+}
 _WRITE_5M = 1.25
 _WRITE_1H = 2.00
 _CACHE_READ = 0.10
-# Claude Fable 5.1 reads cache at 0.025x base input ($0.25/MTok), not the 0.1x
-# every other card charges. Mythos 5.1 was unconfirmed at launch, so it keeps
-# the ordinary multiple.
-_CACHE_READ_FABLE_5_1 = 0.025
+# Cache reads off the ordinary 0.1x: Claude Fable 5.1 reads at 0.025x base
+# input ($0.25/MTok), Opus 5.5 at 0.05x ($0.20/MTok). Mythos 5.1 was
+# unconfirmed at launch, so it keeps the ordinary multiple.
+_CACHE_READ_MODEL: dict[str, float] = {
+    "fable-5-1": 0.025,
+    "opus-5-5": 0.05,
+}
 
 # Re-exported for callers that need to derive a rate card rather than a cost.
 CLAUDE_WRITE_5M = _WRITE_5M
@@ -96,13 +105,17 @@ def claude_family(model: str) -> str | None:
 
 def claude_cache_read(model: str) -> float:
     """What one cached input token costs this model, as a multiple of input."""
-    return _CACHE_READ_FABLE_5_1 if "fable-5-1" in model.lower() else _CACHE_READ
+    name = model.lower()
+    return next((rate for part, rate in _CACHE_READ_MODEL.items() if part in name), _CACHE_READ)
 
 
 def claude_card(model: str) -> tuple[float, float] | None:
-    """The (input, output) $/MTok pair for a model's family."""
+    """The (input, output) $/MTok pair for a model: its own card, else its family's."""
     family = claude_family(model)
-    return None if family is None else _CLAUDE[family]
+    if family is None:
+        return None
+    name = model.lower()
+    return next((card for part, card in _CLAUDE_MODEL.items() if part in name), _CLAUDE[family])
 
 
 def claude_native_usd(
@@ -113,10 +126,10 @@ def claude_native_usd(
     cache_read: int,
     output: int,
 ) -> float:
-    family = claude_family(model)
-    if family is None:
+    card = claude_card(model)
+    if card is None:
         return 0.0
-    inp, out = _CLAUDE[family]
+    inp, out = card
     return (
         uncached / MTOK * inp
         + write_5m / MTOK * inp * _WRITE_5M

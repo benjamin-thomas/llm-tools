@@ -55,6 +55,14 @@ class ClaudePerModelTest(unittest.TestCase):
         self.assertAlmostEqual(one_mtok_out("claude-sonnet-5"), 10.0)
         self.assertAlmostEqual(one_mtok_out("claude-haiku-4-5-20251001"), 5.0)
 
+    def test_opus_5_5_has_its_own_card_below_the_opus_family(self) -> None:
+        """$4 / $20, cache reads $0.20: cheaper than Opus 5 on every bucket."""
+        self.assertAlmostEqual(one_mtok_out("claude-opus-5-5"), 20.0)
+        self.assertAlmostEqual(claude_native_usd("claude-opus-5-5", 1_000_000, 0, 0, 0, 0), 4.0)
+        self.assertAlmostEqual(claude_native_usd("claude-opus-5-5", 0, 0, 0, 1_000_000, 0), 0.20)
+        self.assertAlmostEqual(claude_native_usd("claude-opus-5-5", 0, 0, 1_000_000, 0, 0), 8.0)
+        self.assertAlmostEqual(one_mtok_out("claude-opus-5-5[1m]"), 20.0)
+
     def test_fable_costs_twice_opus(self) -> None:
         self.assertAlmostEqual(
             one_mtok_out("claude-fable-5"), 2 * one_mtok_out("claude-opus-5")
