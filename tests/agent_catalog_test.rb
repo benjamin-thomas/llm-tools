@@ -120,6 +120,25 @@ class AgentCatalogTest < Minitest::Test
                     "opencode mini --standalone --model hyper/plain"
   end
 
+  # A provider lists models no coding agent can run: embeddings, which call no
+  # tool, and speech models, whose context is too short for a session. An
+  # omni-modal model that also takes audio is a coding model all the same.
+  def test_opencode_leaves_out_models_that_cannot_be_coding_agents
+    host = opencode_host(JSON.generate("data" => [
+      { "id" => "mistral-embed", "providerID" => "mistral", "variants" => [],
+        "capabilities" => { "tools" => false, "input" => %w[text] }, "limit" => { "context" => 8000 } },
+      { "id" => "voxtral-small-latest", "providerID" => "mistral", "variants" => [],
+        "capabilities" => { "tools" => true, "input" => %w[text audio pdf] }, "limit" => { "context" => 32_768 } },
+      { "id" => "codestral-latest", "providerID" => "mistral", "variants" => [],
+        "capabilities" => { "tools" => true, "input" => %w[text pdf] }, "limit" => { "context" => 256_000 } },
+      { "id" => "mimo-v2.6-flash-free", "providerID" => "opencode", "variants" => [],
+        "capabilities" => { "tools" => true, "input" => %w[text image audio video] },
+        "limit" => { "context" => 200_000 } }
+    ]))
+    assert_equal %w[opencode:mistral/codestral-latest:default opencode:opencode/mimo-v2.6-flash-free:default],
+                 specs(host)
+  end
+
   def test_opencode_offers_nothing_when_its_listing_fails
     assert_empty lines(opencode_host("not json"))
   end

@@ -49,6 +49,10 @@ module AgentCatalog
   # there is nothing to pin, and it is started without a #variant.
   OPENCODE_ONLY_EFFORT = "default"
 
+  # Below this, no room for an agent's session: the speech models sit at 32k,
+  # every coding model at 128k or more.
+  OPENCODE_MIN_CONTEXT = 100_000
+
   # The real host: listings time out rather than hang a start.
   class Host
     def installed?(command)
@@ -133,6 +137,17 @@ module AgentCatalog
     end
   end
 
+  # Whether a listed model can run a coding agent: providers also list
+  # embeddings, which call no tool, and speech models (Mistral lists both),
+  # whose context is far too short for an agent's session. Not their audio
+  # input: omni-modal coding models take audio too. What a row leaves out is
+  # not held against it.
+  def opencode_coding_model?(row)
+    capabilities = row["capabilities"].is_a?(Hash) ? row["capabilities"] : {}
+    context = row["limit"].is_a?(Hash) ? row["limit"]["context"] : nil
+    capabilities["tools"] != false && (!context.is_a?(Numeric) || context >= OPENCODE_MIN_CONTEXT)
+  end
+
   # mini's --model: provider/model#variant, or bare for a model with no variant.
   def opencode_model(model, effort) = effort == OPENCODE_ONLY_EFFORT ? model : "#{model}##{effort}"
 
@@ -160,6 +175,8 @@ module AgentCatalog
     rows = JSON.parse(json)
     rows = rows.is_a?(Hash) ? (rows["models"] || rows["data"] || []) : rows
     rows.filter_map do |row|
+      next unless AgentCatalog.opencode_coding_model?(row)
+
       efforts = (row["variants"] || []).map { |v| v.is_a?(Hash) ? v["id"] : v }.compact.uniq
       ["#{row['providerID']}/#{row['id']}", efforts.empty? ? [OPENCODE_ONLY_EFFORT] : efforts]
     end
