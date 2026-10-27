@@ -93,7 +93,7 @@ end
 # afford a network round trip, so we serve whatever is cached and fork a
 # detached refresh once the cache goes stale.
 
-MODEL_WINDOW_TTL = 60
+MODEL_WINDOW_TTL = 300 # the same endpoint quota-gauges falls back on: spare it
 MODEL_WINDOW_CACHE = File.join(
   ENV["XDG_CACHE_HOME"] || File.join(Dir.home, ".cache"),
   "claude-statusline", "model-windows.json"
