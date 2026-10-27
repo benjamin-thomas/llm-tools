@@ -300,6 +300,36 @@ class ClaudeUsageCacheTest(unittest.TestCase):
             self.assertAlmostEqual(stale.used, first.used)
             self.assertIn("as of", stale.note)  # says how old it is
 
+    def test_a_refused_call_is_not_retried_for_a_while(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "cache.json"
+            creds = self._creds(tmp)
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=PAYLOAD):
+                claude_limits(creds, NOW, cache=cache)
+            later = NOW + timedelta(hours=2)
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=None) as fetch:
+                claude_limits(creds, later, cache=cache)
+                kept = claude_limits(creds, later + timedelta(minutes=5), cache=cache)
+            self.assertEqual(fetch.call_count, 1)
+            assert kept is not None
+            self.assertAlmostEqual(kept.used, 0.29)  # still the last answer
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=PAYLOAD) as fetch:
+                fresh = claude_limits(creds, later + timedelta(minutes=11), cache=cache)
+            self.assertEqual(fetch.call_count, 1)
+            assert fresh is not None and fresh.fresh
+
+    def test_an_answer_clears_the_refusal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "cache.json"
+            creds = self._creds(tmp)
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=None):
+                claude_limits(creds, NOW, cache=cache)
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=PAYLOAD):
+                claude_limits(creds, NOW + timedelta(minutes=11), cache=cache)
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=PAYLOAD) as fetch:
+                claude_limits(creds, NOW + timedelta(minutes=14), cache=cache)
+            self.assertEqual(fetch.call_count, 1)  # asked again once the answer aged
+
     def test_an_unreadable_answer_is_not_kept(self) -> None:
         """One bad response must not become the fallback for every later run."""
         with tempfile.TemporaryDirectory() as tmp:

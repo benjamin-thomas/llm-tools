@@ -31,6 +31,9 @@ _WEEK = timedelta(days=7)
 # an old one still beats showing nothing while the limit clears.
 CACHE = Path.home() / ".cache" / "token-recap" / "claude-usage.json"
 _FRESH = 120.0
+# A refused call is stamped too, and the endpoint left alone this long after:
+# the panel asks every minute, and retrying through a 429 only prolongs it.
+_BACKOFF = 600.0
 
 # Claude Code hands its status line the same two meters on every repaint, and
 # statusline.rb keeps them here, stamped with the API response they came with.
@@ -181,25 +184,25 @@ def _payload(
 ) -> tuple[dict[str, Any] | None, float | None]:
     """The freshest answer available, without asking more often than needed."""
     kept = _read_cache(cache)
+    fallback = (kept[1], kept[0]) if kept is not None else (None, None)
     if kept is not None and now.timestamp() - kept[0] < _FRESH:
-        return kept[1], kept[0]
+        return fallback
+    if now.timestamp() - _failed_at(cache) < _BACKOFF:
+        return fallback
     live = _fetch(credentials, timeout)
     if live is not None:
         # Only keep an answer worth reusing: caching one we cannot read turns a
         # single bad response into the fallback for every later run.
         if _weekly(live) is not None:
-            _write_cache(cache, now, live)
+            _write_cache(cache, {"fetched_at": now.timestamp(), "payload": live})
         return live, now.timestamp()
-    return (kept[1], kept[0]) if kept is not None else (None, None)
+    blob = _read_json(cache) or {}
+    _write_cache(cache, {**blob, "failed_at": now.timestamp()})
+    return fallback
 
 
 def _read_cache(cache: Path) -> tuple[float, dict[str, Any]] | None:
-    try:
-        blob: Any = json.loads(cache.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(blob, dict):
-        return None
+    blob = _read_json(cache) or {}
     at = blob.get("fetched_at")
     payload = blob.get("payload")
     if not isinstance(at, (int, float)) or not isinstance(payload, dict):
@@ -207,12 +210,16 @@ def _read_cache(cache: Path) -> tuple[float, dict[str, Any]] | None:
     return float(at), payload
 
 
-def _write_cache(cache: Path, now: datetime, payload: dict[str, Any]) -> None:
+def _failed_at(cache: Path) -> float:
+    """When the endpoint last refused us, or 0 when it has not since it last answered."""
+    at = (_read_json(cache) or {}).get("failed_at")
+    return float(at) if isinstance(at, (int, float)) else 0.0
+
+
+def _write_cache(cache: Path, blob: dict[str, Any]) -> None:
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(
-            json.dumps({"fetched_at": now.timestamp(), "payload": payload})
-        )
+        cache.write_text(json.dumps(blob))
     except OSError:
         pass  # a cache we cannot write is not a reason to fail the report
 
