@@ -182,6 +182,19 @@ class BestClaudeLimitsTest(unittest.TestCase):
         self.assertAlmostEqual(got.used, 0.35)
         self.assertIn("as of", got.note)
 
+    def test_an_old_copy_beats_an_older_kept_answer(self) -> None:
+        """Refused, the endpoint can only offer its last answer, from the day before."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "c.json"
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=PAYLOAD):
+                claude_limits(self._creds(tmp), NOW - timedelta(days=1), cache=cache)
+            drop = statusline_drop(tmp, NOW - timedelta(hours=2))
+            with mock.patch.object(anthropic_usage, "_fetch", return_value=None):
+                got = best_claude_limits(self._creds(tmp), NOW, drop=drop, cache=cache)
+        assert got is not None
+        self.assertAlmostEqual(got.used, 0.35)  # the copy's, not the kept 29%
+        self.assertIn("as of", got.note)
+
     def test_offline_never_asks_but_still_reads_the_copy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             drop = statusline_drop(tmp, NOW - timedelta(hours=2))

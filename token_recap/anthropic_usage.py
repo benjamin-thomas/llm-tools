@@ -109,18 +109,23 @@ def best_claude_limits(
     drop: Path = STATUSLINE_DROP,
     cache: Path = CACHE,
 ) -> ClaudeLimits | None:
-    """The status line's copy while it is fresh, else the endpoint, else the
-    copy however old — an old reading still beats none, and says its age."""
+    """The status line's copy while it is fresh, else whichever of the
+    endpoint's answer and the copy is newer — the endpoint may only have an
+    old kept answer to give. An old reading still beats none, and says its age."""
     blob = _read_json(drop)
     copied = limits_from_statusline(blob, now) if blob else None
     if copied is not None and copied.as_of and now - copied.as_of <= _STATUSLINE_MAX_AGE:
         return copied
     live = None if offline else claude_limits(credentials, now, cache=cache)
-    if live is not None or copied is None:
+    if copied is None or (live is not None and not _older(live, copied)):
         return live
     seen = f"as of {copied.as_of:%d %b %H:%M}" if copied.as_of else "as of ?"
     note = f"{copied.note} · {seen}" if copied.note else seen
     return replace(copied, note=note, fresh=False)
+
+
+def _older(one: ClaudeLimits, other: ClaudeLimits) -> bool:
+    return one.as_of is not None and other.as_of is not None and one.as_of < other.as_of
 
 
 def limits_from_statusline(blob: dict[str, Any], now: datetime) -> ClaudeLimits | None:
