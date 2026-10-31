@@ -100,6 +100,15 @@ if ARGV.first == "share-path"
   puts source
   exit
 end
+# `cache-dir`: the host side of every sandbox's ~/.cache, for a script that
+# copies a cache in from the host's (never the other way round).
+if ARGV.first == "cache-dir"
+  abort "Usage: sandbox-agent cache-dir" unless ARGV.size == 1
+  dir = SandboxLib.sandbox_cache_dir(ENV.fetch("HOME"))
+  FileUtils.mkdir_p(dir)
+  puts dir
+  exit
+end
 
 # `promote [<worktree-dir>]`: copy a worktree's approved .sandbox-mounts up to
 # its main checkout. Defaults to cwd, like `allow`.
@@ -157,6 +166,10 @@ parser = OptionParser.new do |opts|
   opts.separator "  sandbox-agent share-path <project-dir> <name>"
   opts.separator "    Print (and create) the host side of a --share, for the script"
   opts.separator "    that fills or reads it."
+  opts.separator ""
+  opts.separator "  sandbox-agent cache-dir"
+  opts.separator "    Print (and create) the host side of every sandbox's ~/.cache, never"
+  opts.separator "    the host's own: copy a cache in there to warm it, host to sandbox only."
   opts.separator ""
   opts.separator "  sandbox-agent doctor <project-dir> [--write]"
   opts.separator "    Report what this project must declare in .sandbox-mounts before it"

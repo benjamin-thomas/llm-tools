@@ -17,7 +17,9 @@
 #    invokes ruby, node, claude... on the host. Fix: toolchains ro, libraries
 #    installed per project (vendor/bundle, node_modules). Done for Haskell:
 #    a launch mounting ~/.ghcup or ~/.config/cabal writable is refused
-#    (host_toolchain_paths).
+#    (host_toolchain_paths). Done for ~/.cache: every sandbox gets its own,
+#    and a launch mounting any part of the host's writable is refused (see
+#    "~/.cache"); never undo that to warm a cache, copy it in instead.
 #
 # 2. Dev servers may run on the host. Some dev setups start their servers in a
 #    host terminal, from source and node_modules the agent writes: the same
@@ -347,7 +349,7 @@ module SandboxLib
     { glob: "dune-project",     name: "OCaml (opam)",
       lines: ["ro:~/.opam", "path:~/.opam/<switch>/bin"] },
     { glob: "pyproject.toml",   name: "Python — pick your tool",
-      lines: ["rw:~/.cache/uv", "ro:~/.local/share/uv", "path:~/.local/bin", "# or pyenv / pipx — see --help"] },
+      lines: ["ro:~/.local/share/uv", "path:~/.local/bin", "# uv's cache is the sandboxes' own ~/.cache; or pyenv / pipx — see --help"] },
     { glob: "go.mod",           name: "Go",
       lines: ["# nothing needed — the toolchain on your PATH is auto-detected"] },
   ].freeze
@@ -732,10 +734,54 @@ module SandboxLib
     "#{home}/.config/cabal",
   ]
 
-  # Caches under the writable ~/.cache that the host runs code from: opencode
-  # reuses the npm packages it installed there (formatters, plugins) with no
-  # integrity check. Each is hidden behind a private tmpfs.
+  # Caches the host runs code from, hidden behind a private tmpfs even inside
+  # the sandboxes' own ~/.cache: opencode reuses the npm packages it installed
+  # there (formatters, plugins) with no integrity check, so one sandbox must
+  # not leave them for the next either.
   def host_code_caches(home) = ["#{home}/.cache/opencode"]
+
+  # --- ~/.cache ----------------------------------------------------------------
+  #
+  # NEVER mount the host's ~/.cache, or any part of it, writable. The host runs
+  # code from all over it: codex's runtimes (node, python, git), the browsers
+  # test tools download (puppeteer, playwright, selenium), build caches it
+  # trusts (go-build, dune), package caches (uv, pip, yarn). A sandbox that
+  # wrote there would run code on the host the next time any of them starts.
+  #
+  # Every sandbox gets this directory at ~/.cache instead: persistent, shared by
+  # the sandboxes, never read by the host. A project that wants a cache warm
+  # copies it in from the host (`sandbox-agent cache-dir` prints where), host
+  # to sandbox only; never the other way round.
+  def sandbox_cache_dir(home) = "#{home}/.local/share/sandbox-agent/cache"
+
+  # The one part of the host's ~/.cache a sandbox may write: data the host only
+  # parses, never runs. Claude Code's status line leaves the rate limits it saw
+  # there, and token-recap reads them on the host.
+  def shared_cache_data(home) = ["#{home}/.cache/claude-statusline"]
+
+  # Copied from the host's ~/.cache into the sandboxes' own when missing, or
+  # when the host's has changed (its marker file differs): what an agent needs
+  # at start and could not download from inside. A real copy, never a link: a
+  # hard link would share the host's very file.
+  SEEDED_CACHES = {
+    "codex-runtimes/codex-primary-runtime" => "runtime.json",
+  }.freeze
+
+  def seed_sandbox_cache!(home)
+    SEEDED_CACHES.each do |dir, marker|
+      host = File.join(home, ".cache", dir)
+      next unless File.file?(File.join(host, marker))
+
+      copy = File.join(sandbox_cache_dir(home), dir)
+      same = File.file?(File.join(copy, marker)) &&
+             File.read(File.join(copy, marker)) == File.read(File.join(host, marker))
+      next if same
+
+      FileUtils.rm_rf(copy)
+      FileUtils.mkdir_p(File.dirname(copy))
+      FileUtils.cp_r(host, copy, preserve: true)
+    end
+  end
 
   # The login keyring, under the read-only ~/.local. Encrypted, but a
   # gnome-keyring started inside (see KEYRING_SERVICES) would ask for the login
@@ -875,6 +921,17 @@ module SandboxLib
     host_code_caches(home).each do |dir|
       flag = effective_mount(args, dir)
       violations << "#{dir} is writable: the host runs code from it" if writable_flags.include?(flag)
+    end
+    # See "~/.cache": by its source, wherever it is mounted inside.
+    host_cache = "#{home}/.cache"
+    args.each_with_index do |arg, i|
+      next unless writable_flags.include?(arg)
+
+      src = args[i + 1]
+      next unless exposes?(src, host_cache)
+      next if shared_cache_data(home).any? { |data| src == data || src.start_with?(File.join(data, "")) }
+
+      violations << "#{arg} #{src} makes the host's ~/.cache writable: the host runs code from it"
     end
     violations << "#{keyring_files(home)} is reachable: the login keyring" if reachable?(args, keyring_files(home))
     KEYRING_SERVICES.each do |service|
@@ -1206,8 +1263,8 @@ module SandboxLib
 
     # Go toolchain + GOPATH, tracking whatever `go` is on the caller's PATH (see
     # detect_go_paths). GOROOT is mounted ro; GOPATH rw (module cache + 'go install'
-    # bins). Both bin dirs go on PATH below. GOCACHE (~/.cache/go-build) is already
-    # covered by the ~/.cache mount.
+    # bins). Both bin dirs go on PATH below. GOCACHE (~/.cache/go-build) is the
+    # sandboxes' own, like the rest of ~/.cache.
     go_paths = detect_go_paths
     if go_paths
       args.push(*ro(go_paths[:root])) if go_paths[:root] && File.directory?(go_paths[:root])
@@ -1240,14 +1297,19 @@ module SandboxLib
       llm_tools_root.start_with?("#{project_dir}/")
     args.push(*ro(llm_tools_root)) if File.directory?(llm_tools_root) && !llm_tools_covered
 
+    # The sandboxes' own ~/.cache, never the host's: see "~/.cache".
     cache_dir = "#{home}/.cache"
-    args.push(*rw(cache_dir))    if File.directory?(cache_dir)
-    # Created first, like HOST_DAEMON_DIRS: one created by a sandbox, through
-    # the writable ~/.cache, is the one the host would then run code from.
+    own_cache = sandbox_cache_dir(home)
+    FileUtils.mkdir_p(own_cache)
+    seed_sandbox_cache!(home)
+    args.push(*rw(own_cache, cache_dir))
+    shared_cache_data(home).each do |data|
+      FileUtils.mkdir_p(data)
+      args.push(*rw(data))
+    end
+    # Their mount points, made in the sandboxes' cache where bwrap finds them.
     host_code_caches(home).each do |dir|
-      next unless File.directory?(cache_dir)
-
-      FileUtils.mkdir_p(dir)
+      FileUtils.mkdir_p(File.join(own_cache, dir.delete_prefix(File.join(cache_dir, ""))))
       args.push("--tmpfs", dir)
     end
     pictures_dir = "#{home}/Pictures"

@@ -46,6 +46,16 @@ class SandboxInvariantsTest < Minitest::Test
     end
   end
 
+  def test_a_launch_gives_the_sandbox_its_own_cache_never_the_host_s
+    home = ENV.fetch("HOME")
+    Dir.mktmpdir("invariants-project-") do |project|
+      args = SandboxLib.build_base_args(project, git_rw: false)
+      binds = args.each_cons(3).select { |flag, _, _| flag == "--bind" }.map { |_, src, dest| [src, dest] }
+      assert_includes binds, [SandboxLib.sandbox_cache_dir(home), "#{home}/.cache"]
+      refute_includes binds, ["#{home}/.cache", "#{home}/.cache"]
+    end
+  end
+
   def test_password_store_is_refused
     refute_empty violations(base + ro("#{@home}/.password-store"))
   end
@@ -171,8 +181,27 @@ class SandboxInvariantsTest < Minitest::Test
     refute_empty violations(base + ["--tmpfs", "#{@home}/.cache/opencode"] + rw("#{@home}/.cache") + hide_daemons)
   end
 
-  def test_the_rest_of_the_cache_may_be_writable_with_opencode_hidden
-    assert_empty violations(base + rw("#{@home}/.cache") + ["--tmpfs", "#{@home}/.cache/opencode"] + hide_daemons)
+  # The host runs code from all over its ~/.cache: codex's runtimes, browsers
+  # that test tools download, build caches (go-build, dune), package caches.
+  def test_the_host_cache_is_never_writable_in_any_part
+    %w[.cache .cache/uv .cache/go-build .cache/codex-runtimes .cache/dune].each do |dir|
+      refute_empty violations(base + rw("#{@home}/#{dir}") + hide_daemons), dir
+    end
+  end
+
+  def test_the_sandboxes_own_cache_may_be_writable_where_the_host_s_was
+    own = rw(SandboxLib.sandbox_cache_dir(@home), "#{@home}/.cache")
+    assert_empty violations(base + own + ["--tmpfs", "#{@home}/.cache/opencode"] + hide_daemons)
+  end
+
+  # Claude Code's status line, run inside, leaves the rate limits it saw there;
+  # token-recap on the host only parses that JSON.
+  def test_the_status_line_s_readings_may_be_shared
+    assert_empty violations(base + rw("#{@home}/.cache/claude-statusline") + hide_daemons)
+  end
+
+  def test_the_status_line_exception_is_its_directory_only
+    refute_empty violations(base + rw("#{@home}/.cache/claude-statusline-other") + hide_daemons)
   end
 
   def test_haskell_toolchain_may_be_read
