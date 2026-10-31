@@ -14,6 +14,7 @@ DIM   = "\033[2m"
 GREEN = "\033[32m"
 AMBER = "\033[33m"
 RED   = "\033[31m"
+FRAME = "\033[38;5;175m" # muted pink: ties the meter brackets to their "left" tag
 RESET = "\033[0m"
 
 # $/MTok base input, mirroring ../token_recap/native.py (authoritative; a
@@ -56,6 +57,14 @@ def reset_in(secs)
   "#{mins}m"
 end
 
+# A remaining-quota meter: only the number stands out, the rest recedes. The
+# meters share one bracket tagged "left": "5h left" would read as five hours.
+def meter(label, pct, tail = "")
+  "#{DIM}#{label}: #{RESET}#{CYAN}#{pct}%#{RESET}#{DIM}#{tail}#{RESET}"
+end
+
+DOT = "#{DIM} · #{RESET}"
+
 data = JSON.parse($stdin.read)
 # File.write("/tmp/statusline-debug.json", JSON.pretty_generate(data))
 
@@ -64,7 +73,7 @@ left = (data.dig("context_window", "remaining_percentage") || 100).to_i
 
 now = Time.now.to_i
 
-parts = ["#{CYAN}#{model}#{RESET}", "#{CYAN}ctx #{left}%#{RESET}"]
+meters = [meter("ctx", left)]
 
 if (rate_limits = data["rate_limits"])
   five = rate_limits.fetch("five_hour")
@@ -73,9 +82,8 @@ if (rate_limits = data["rate_limits"])
   five_left = (100 - five.fetch("used_percentage")).round
   seven_left = (100 - seven.fetch("used_percentage")).round
 
-  rate = "5h #{five_left}% ↻#{reset_in(five.fetch('resets_at') - now)}" \
-    " · 7d #{seven_left}% ↻#{reset_in(seven.fetch('resets_at') - now)}"
-  parts << "#{CYAN}#{rate}#{RESET}"
+  meters << meter("5h", five_left, " ↻#{reset_in(five.fetch('resets_at') - now)}")
+  meters << meter("7d", seven_left, " ↻#{reset_in(seven.fetch('resets_at') - now)}")
 end
 
 # --- Per-model weekly windows (the "Fable" meter) ----------------------------
@@ -171,14 +179,13 @@ begin
   end
 
   if windows && !windows.empty?
-    meters = windows.map { |w| "#{w['name']} #{(100 - w['used'].to_f).round}%" }
-    parts << "#{CYAN}#{meters.join(' · ')}#{RESET}"
+    meters.concat(windows.map { |w| meter(w["name"], (100 - w["used"].to_f).round) })
   end
 rescue StandardError
   # no token, no network, unreadable cache: just drop the segment
 end
 
-puts parts.join(" | ")
+puts "#{CYAN}#{model}#{RESET}  #{FRAME}⟨ #{RESET}#{meters.join(DOT)}#{FRAME} ⟩ left#{RESET}"
 
 # --- Line 2: real-API-price spend + token stats ------------------------------
 #
