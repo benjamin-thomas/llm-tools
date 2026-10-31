@@ -767,6 +767,15 @@ module SandboxLib
     "codex-runtimes/codex-primary-runtime" => "runtime.json",
   }.freeze
 
+  # A .sandbox-mounts line naming the host's ~/.cache or a part of it, bar the
+  # shared data. (A parent of it mounted writable is the invariants' to refuse.)
+  def host_cache_line?(home, mount)
+    host_cache = "#{home}/.cache"
+    within = ->(path, dir) { path == dir || path.start_with?(File.join(dir, "")) }
+    [mount[:path], mount[:target]].any? { |path| within.(path, host_cache) } &&
+      shared_cache_data(home).none? { |data| within.(mount[:target], data) }
+  end
+
   def seed_sandbox_cache!(home)
     SEEDED_CACHES.each do |dir, marker|
       host = File.join(home, ".cache", dir)
@@ -1360,6 +1369,12 @@ module SandboxLib
     extra_path_dirs = []
     declared_mounts.each do |mount|
       path = mount[:path]
+      # ~/.cache is the sandboxes' own (see "~/.cache"): a line for the host's,
+      # read or write, from before that, is dropped rather than refused.
+      if %w[ro rw].include?(mount[:mode]) && host_cache_line?(home, mount)
+        warn "~/.cache is this sandbox's own, never the host's; ignored: #{mount[:line]}"
+        next
+      end
       case mount[:mode]
       when "ro"   then args.push(*ro(path)) if File.exist?(path)
       when "rw"   then bind_rw_mount!(args, path, git_writable: git_rw) if File.exist?(path)

@@ -46,6 +46,22 @@ class SandboxInvariantsTest < Minitest::Test
     end
   end
 
+  # A project's .sandbox-mounts may still name part of the host's ~/.cache, from
+  # before each sandbox had its own: such a line is dropped, said, never mounted.
+  def test_a_project_s_lines_for_the_host_s_cache_are_dropped_with_a_warning
+    home = ENV.fetch("HOME")
+    Dir.mktmpdir("invariants-project-") do |project|
+      File.write(File.join(project, ".sandbox-mounts"), "rw:~/.cache/dune\nro:~/.cache\n")
+      args = nil
+      _, err = capture_io { args = SandboxLib.build_base_args(project, git_rw: false) }
+      sources = args.each_cons(2).select { |flag, _| SandboxLib::BIND_FLAGS.include?(flag) }.map(&:last)
+      refute_includes sources, "#{home}/.cache/dune"
+      refute_includes sources, "#{home}/.cache"
+      assert_match(/ignored: rw:~\/\.cache\/dune/, err)
+      assert_match(/ignored: ro:~\/\.cache\b/, err)
+    end
+  end
+
   def test_a_launch_gives_the_sandbox_its_own_cache_never_the_host_s
     home = ENV.fetch("HOME")
     Dir.mktmpdir("invariants-project-") do |project|
