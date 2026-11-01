@@ -57,7 +57,7 @@ class SandboxInvariantsTest < Minitest::Test
       sources = args.each_cons(2).select { |flag, _| SandboxLib::BIND_FLAGS.include?(flag) }.map(&:last)
       refute_includes sources, "#{home}/.cache/dune"
       refute_includes sources, "#{home}/.cache"
-      assert_match(/ignored: rw:~\/\.cache\/dune/, err)
+      assert_match(/ignored: rw:~\/\.cache\/dune.*copy:~\/\.cache\/dune/m, err)
       assert_match(/ignored: ro:~\/\.cache\b/, err)
     end
   end
@@ -189,6 +189,44 @@ class SandboxInvariantsTest < Minitest::Test
     refute_empty violations(base + rw("#{@home}/.ghcup"))
     refute_empty violations(base + rw("#{@home}/.ghcup/bin"))
     refute_empty violations(base + rw("#{@home}/.config/cabal"))
+  end
+
+  # A toolchain's copy is writable: its generation, at its path.
+  def copy_of(path) = File.join(SandboxLib.copy_store(@home), path.delete_prefix("/").tr("/", "-"), "0123abcd")
+
+  def test_a_copy_of_a_host_toolchain_may_be_writable
+    %w[.rbenv .ghcup .local/state/cabal].each do |dir|
+      path = "#{@home}/#{dir}"
+      assert_empty violations(base + rw(copy_of(path), path) + hide_daemons), dir
+    end
+  end
+
+  def test_a_copy_of_the_host_s_cache_may_be_writable
+    path = "#{@home}/.cache/dune"
+    assert_empty violations(base + rw(copy_of(path), path) + hide_daemons)
+  end
+
+  # Only a generation: the store, or a copy's folder (its locks, `current`),
+  # are sandbox-agent's to manage.
+  def test_only_a_generation_of_a_copy_may_be_writable
+    store = SandboxLib.copy_store(@home)
+    refute_empty violations(base + rw(store))
+    refute_empty violations(base + rw(File.dirname(copy_of("#{@home}/.rbenv"))))
+    refute_empty violations(base + rw(File.join(copy_of("#{@home}/.rbenv"), "versions")))
+  end
+
+  # A copy holds what its host path held: the same floor, at its destination.
+  def test_a_copy_of_what_no_sandbox_may_see_is_refused
+    refute_empty violations(base + rw(copy_of("#{@home}/.ssh"), "#{@home}/.ssh"))
+    refute_empty violations(base + ro(copy_of("#{@home}/.gnupg"), "#{@home}/.gnupg"))
+  end
+
+  # The copy's .git is not one the host runs git in.
+  def test_a_copied_repository_s_git_may_be_writable
+    FileUtils.mkdir_p(File.join(@home, ".rbenv", ".git", "hooks"))
+    File.write(File.join(@home, ".rbenv", ".git", "HEAD"), "ref: refs/heads/master\n")
+    path = "#{@home}/.rbenv"
+    assert_empty violations(base + rw(copy_of(path), path) + hide_daemons)
   end
 
   # Host opencode runs the npm packages it finds under its cache, unchecked.

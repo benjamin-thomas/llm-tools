@@ -406,7 +406,7 @@ module SandboxLib
     if write && !missing.empty?
       header = File.exist?(mounts_file) ? "" : <<~HEAD
         # Extra mounts for sandbox-agent (one per line)
-        # Formats: ro:/path, rw:/path, path:/path/bin
+        # Formats: ro:/path, rw:/path, copy:/path, path:/path/bin
       HEAD
       File.open(mounts_file, "a") do |io|
         io.puts(header) unless header.empty?
@@ -749,26 +749,20 @@ module SandboxLib
   # wrote there would run code on the host the next time any of them starts.
   #
   # Every sandbox gets this directory at ~/.cache instead: persistent, shared by
-  # the sandboxes, never read by the host. A project that wants a cache warm
-  # copies it in from the host (`sandbox-agent cache-dir` prints where), host
-  # to sandbox only; never the other way round.
-  def sandbox_cache_dir(home) = "#{home}/.local/share/sandbox-agent/cache"
+  # the sandboxes, never read by the host. A project that wants a part of the
+  # host's warm declares copy:~/.cache/<it> (see "Copies"): host to sandbox
+  # only, never the other way round.
+  def sandbox_data_dir(home) = "#{home}/.local/share/sandbox-agent"
+  def sandbox_cache_dir(home) = "#{sandbox_data_dir(home)}/cache"
 
   # The one part of the host's ~/.cache a sandbox may write: data the host only
   # parses, never runs. Claude Code's status line leaves the rate limits it saw
   # there, and token-recap reads them on the host.
   def shared_cache_data(home) = ["#{home}/.cache/claude-statusline"]
 
-  # Copied from the host's ~/.cache into the sandboxes' own when missing, or
-  # when the host's has changed (its marker file differs): what an agent needs
-  # at start and could not download from inside. A real copy, never a link: a
-  # hard link would share the host's very file.
-  SEEDED_CACHES = {
-    "codex-runtimes/codex-primary-runtime" => "runtime.json",
-  }.freeze
-
-  # A .sandbox-mounts line naming the host's ~/.cache or a part of it, bar the
-  # shared data. (A parent of it mounted writable is the invariants' to refuse.)
+  # A .sandbox-mounts ro:/rw: line naming the host's ~/.cache or a part of it,
+  # bar the shared data. (A parent of it mounted writable is the invariants' to
+  # refuse.) copy: is the way to such a cache: see "Copies".
   def host_cache_line?(home, mount)
     host_cache = "#{home}/.cache"
     within = ->(path, dir) { path == dir || path.start_with?(File.join(dir, "")) }
@@ -776,20 +770,159 @@ module SandboxLib
       shared_cache_data(home).none? { |data| within.(mount[:target], data) }
   end
 
-  def seed_sandbox_cache!(home)
-    SEEDED_CACHES.each do |dir, marker|
-      host = File.join(home, ".cache", dir)
-      next unless File.file?(File.join(host, marker))
+  # --- Copies (copy:) ----------------------------------------------------------
+  #
+  # `copy:<host dir>` in .sandbox-mounts gives the sandboxes their own copy of a
+  # host directory, mounted writable at the same path: a toolchain or a cache is
+  # where its tools look for it, warm, and whatever a sandbox installs there
+  # stays in the copy. The host never reads a copy, so nothing flows back: what
+  # a sandbox installed reaches the host only when the user installs it there.
+  #
+  # A copy follows the host. At every launch the host tree's manifest (names,
+  # types, sizes, mtimes, modes, link targets; about a second for 300k files)
+  # is digested, and each copy is a generation named after the digest it was
+  # taken at:
+  #
+  #   ~/.local/share/sandbox-agent/copies/
+  #     home-me-.tool/      one folder per host path, dashed like the approvals
+  #       build.lock        held by the launch picking, building or deleting
+  #       current           -> 3f2a…, the newest generation
+  #       3f2a…/            a generation: the copy, bound at ~/.tool
+  #       3f2a….lock        shared-locked by every sandbox running on it
+  #
+  # Host unchanged: the current generation is bound, with what sandboxes left
+  # in it. Host changed: a new generation is copied beside it, then renamed
+  # into place. A generation is never rewritten: a running sandbox keeps the
+  # one it was launched with, untouched, and a generation no sandbox holds any
+  # more is deleted by the next launch of that copy.
+  #
+  # Plain copies (cp -a, reflinked where the filesystem can), never hard links:
+  # a sandbox writing a hard-linked file would write the host's.
+  def copy_store(home) = "#{sandbox_data_dir(home)}/copies"
 
-      copy = File.join(sandbox_cache_dir(home), dir)
-      same = File.file?(File.join(copy, marker)) &&
-             File.read(File.join(copy, marker)) == File.read(File.join(host, marker))
-      next if same
+  # Copies every launch gets when the host has them: codex's runtime, which it
+  # needs at start and does not download from inside.
+  def default_copies(home) = ["#{home}/.cache/codex-runtimes/codex-primary-runtime"]
 
-      FileUtils.rm_rf(copy)
-      FileUtils.mkdir_p(File.dirname(copy))
-      FileUtils.cp_r(host, copy, preserve: true)
+  CopyError = Class.new(StandardError)
+
+  # The generation locks of this process's sandbox: open as long as it runs.
+  HELD_COPY_LOCKS = []
+
+  # Why `path` may not be copied, or nil. The copies sit on disk beside every
+  # sandbox's data, so never what forbidden_paths guards, sandbox-agent's
+  # state, nor its own data (a copy of the copies).
+  def copy_refusal(home, uid, path)
+    blocked = forbidden_paths(home, uid) + own_state_paths(home) + [sandbox_data_dir(home)]
+    hit = blocked.find { |dir| exposes?(path, dir) }
+    hit && "copy:#{path} would copy #{hit}"
+  end
+
+  # What changes when anything under `root` is added, removed or rewritten.
+  def tree_digest(root)
+    out, err, status = Open3.capture3("find", root, "-printf", "%P\\t%y\\t%s\\t%T@\\t%m\\t%l\\0")
+    raise CopyError, "cannot read #{root}: #{err.strip}" unless status.success?
+
+    Digest::SHA256.hexdigest(out.b.split("\0".b).sort.join("\0"))[0, 16]
+  end
+
+  # The generation of `host_path`'s copy matching the host as it is now, built
+  # if missing. Returns {dir:, lock:, built:}: bind `dir`, and keep `lock` open
+  # for as long as the sandbox runs — closing it lets a later launch delete
+  # the generation.
+  def prepare_copy!(host_path, store:)
+    source = File.realpath(host_path)
+    raise CopyError, "copy: wants a directory: #{host_path}" unless File.directory?(source)
+
+    digest = tree_digest(source)
+    root = File.join(store, host_path.delete_prefix("/").tr("/", "-"))
+    FileUtils.mkdir_p(root)
+    File.open(File.join(root, "build.lock"), File::RDWR | File::CREAT) do |build|
+      build.flock(File::LOCK_EX)
+      gen = File.join(root, digest)
+      built = !File.directory?(gen)
+      build_generation!(source, gen) if built
+      swap_current!(root, digest)
+      lock = File.open("#{gen}.lock", File::RDWR | File::CREAT)
+      lock.flock(File::LOCK_SH)
+      remove_unused_generations!(root)
+      { dir: gen, lock: lock, built: built }
     end
+  rescue SystemCallError => e
+    raise CopyError, "cannot copy #{host_path}: #{e.message}"
+  end
+
+  # Built aside, then renamed into place: never seen half done.
+  def build_generation!(source, gen)
+    tmp = "#{gen}.tmp-#{Process.pid}"
+    warn "Copying #{source} for the sandboxes (new, or changed on the host)…"
+    _, err, status = Open3.capture3("cp", "-a", "--reflink=auto", "--", source, tmp)
+    unless status.success?
+      remove_tree(tmp)
+      raise CopyError, "cannot copy #{source}: #{err.strip}"
+    end
+    File.rename(tmp, gen)
+  end
+
+  def swap_current!(root, name)
+    current = File.join(root, "current")
+    return if File.symlink?(current) && File.readlink(current) == name
+
+    tmp = "#{current}.tmp-#{Process.pid}"
+    remove_tree(tmp)
+    File.symlink(name, tmp)
+    File.rename(tmp, current)
+  end
+
+  # Under build.lock, so no launch is picking a generation meanwhile: what is
+  # not current and not shared-locked by a running sandbox goes, and so does
+  # what a launch that died left half built.
+  def remove_unused_generations!(root)
+    current = File.readlink(File.join(root, "current"))
+    Dir.children(root).each do |name|
+      path = File.join(root, name)
+      next unless File.exist?(path) || File.symlink?(path) # went with its generation
+
+      if name.include?(".tmp-")
+        remove_tree(path)
+      elsif name.end_with?(".lock") && name != "build.lock" && !File.exist?(path.delete_suffix(".lock"))
+        File.unlink(path)
+      elsif File.directory?(path) && !File.symlink?(path) && name != current
+        File.open("#{path}.lock", File::RDWR | File::CREAT) do |lock|
+          next unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+
+          remove_tree(path)
+          File.unlink(lock.path)
+        end
+      end
+    rescue SystemCallError => e
+      warn "Could not delete an old copy, kept: #{path} (#{e.message})"
+    end
+  end
+
+  # A copy may hold read-only directories (module caches do): writable first.
+  def remove_tree(path)
+    return File.unlink(path) if File.symlink?(path)
+    return unless File.exist?(path)
+
+    system("chmod", "-R", "u+w", "--", path)
+    FileUtils.rm_r(path)
+  end
+
+  # Binds the copy of `path` at `path`, its generation locked for as long as
+  # this process lives. Raises CopyError.
+  def bind_copy!(args, path, home)
+    real = begin File.realpath(path) rescue path end
+    refusal = copy_refusal(home, Process.uid, path) || copy_refusal(home, Process.uid, real)
+    raise CopyError, refusal if refusal
+
+    copy = prepare_copy!(path, store: copy_store(home))
+    HELD_COPY_LOCKS << copy[:lock]
+    # Under ~/.cache, its mount point goes in the sandboxes' own, where bwrap
+    # looks for it.
+    cache = File.join(home, ".cache", "")
+    FileUtils.mkdir_p(File.join(sandbox_cache_dir(home), path.delete_prefix(cache))) if path.start_with?(cache)
+    args.push(*rw(copy[:dir], path))
   end
 
   # The login keyring, under the read-only ~/.local. Encrypted, but a
@@ -852,9 +985,11 @@ module SandboxLib
   end
 
   # Git directories among the mounts: a mounted .git, or a mounted repository's.
-  def mounted_git_dirs(args)
+  # Not a copy's: its .git is not one the host runs git in.
+  def mounted_git_dirs(args, copies)
     args.each_with_index.filter_map do |arg, i|
       next unless BIND_FLAGS.include?(arg)
+      next if args[i + 1].start_with?(File.join(copies, ""))
 
       dest = args[i + 2]
       if File.file?(File.join(dest, "HEAD")) && File.directory?(File.join(dest, "objects"))
@@ -865,8 +1000,9 @@ module SandboxLib
     end
   end
 
-  def invariant_violations(args, home:, uid:, git_dirs: [], share_store: SHARE_DIR)
+  def invariant_violations(args, home:, uid:, git_dirs: [], share_store: SHARE_DIR, copies: copy_store(home))
     violations = []
+    writable_flags = %w[--bind --dev-bind --bind-try --dev-bind-try]
 
     # See "Shares": one share per mount, never a folder holding several.
     args.each_with_index do |arg, i|
@@ -878,6 +1014,18 @@ module SandboxLib
       depth = src.delete_prefix(File.join(share_store, "")).split("/").size
       violations << "#{arg} #{src} exposes more than one share" unless src.start_with?(File.join(share_store, "")) && depth == 2
     end
+
+    # See "Copies": writable, a generation and nothing else, never the store or
+    # a copy's own folder (its locks, `current`).
+    args.each_with_index do |arg, i|
+      next unless writable_flags.include?(arg)
+
+      src = args[i + 1]
+      next unless exposes?(src, copies)
+
+      depth = src.delete_prefix(File.join(copies, "")).split("/").size
+      violations << "#{arg} #{src} is not one generation of a copy" unless src.start_with?(File.join(copies, "")) && depth == 2
+    end
     forbidden = forbidden_paths(home, uid)
 
     args.each_with_index do |arg, i|
@@ -886,15 +1034,18 @@ module SandboxLib
       src = args[i + 1]
       next if src == "/dev/null" # a mask hides a path, it does not grant it
 
-      # bwrap follows symlinks, so check where the source really lands too.
+      # bwrap follows symlinks, so check where the source really lands too; a
+      # copy holds what its host path did, and is bound at that path.
       real = begin File.realpath(src) rescue src end
+      seen = [src, real]
+      seen << args[i + 2] if src.start_with?(File.join(copies, ""))
       forbidden.each do |f|
-        violations << "#{arg} #{src} exposes #{f}" if exposes?(src, f) || exposes?(real, f)
+        violations << "#{arg} #{src} exposes #{f}" if seen.any? { |path| exposes?(path, f) }
       end
     end
 
     args.each_with_index do |arg, i|
-      next unless %w[--bind --dev-bind --bind-try --dev-bind-try].include?(arg)
+      next unless writable_flags.include?(arg)
 
       src = args[i + 1]
       own_state_paths(home).each do |own|
@@ -905,7 +1056,6 @@ module SandboxLib
       end
     end
 
-    writable_flags = %w[--bind --dev-bind --bind-try --dev-bind-try]
     host_toolchain_paths(home).each do |tool|
       # A writable bind of the tool, of a parent or of a part of it, unless a later
       # read-only bind covers that very spot.
@@ -948,7 +1098,7 @@ module SandboxLib
     end
 
     # See "Git write access" above.
-    (git_dirs + mounted_git_dirs(args)).uniq.each do |git_dir|
+    (git_dirs + mounted_git_dirs(args, copies)).uniq.each do |git_dir|
       # A linked worktree's own metadata dir (it names its common dir) has only
       # config.worktree among these: git reads the rest from the common dir.
       entries = File.file?(File.join(git_dir, "commondir")) ? ["config.worktree"] : GIT_HOST_CODE
@@ -1310,7 +1460,6 @@ module SandboxLib
     cache_dir = "#{home}/.cache"
     own_cache = sandbox_cache_dir(home)
     FileUtils.mkdir_p(own_cache)
-    seed_sandbox_cache!(home)
     args.push(*rw(own_cache, cache_dir))
     shared_cache_data(home).each do |data|
       FileUtils.mkdir_p(data)
@@ -1320,6 +1469,19 @@ module SandboxLib
     host_code_caches(home).each do |dir|
       FileUtils.mkdir_p(File.join(own_cache, dir.delete_prefix(File.join(cache_dir, ""))))
       args.push("--tmpfs", dir)
+    end
+    # The copies, all projects' together, stay out of sight (a sandbox gets its
+    # own at their host paths): an empty read-only tmpfs over the store.
+    FileUtils.mkdir_p(copy_store(home))
+    args.push("--tmpfs", copy_store(home), "--remount-ro", copy_store(home))
+    default_copies(home).each do |path|
+      next unless File.directory?(path)
+
+      begin
+        bind_copy!(args, path, home)
+      rescue CopyError => e
+        warn "#{e.message}\n  (#{path} not copied: a tool needing it may offer to download it)"
+      end
     end
     pictures_dir = "#{home}/Pictures"
     args.push(*ro(pictures_dir)) if File.directory?(pictures_dir)
@@ -1373,11 +1535,22 @@ module SandboxLib
       # read or write, from before that, is dropped rather than refused.
       if %w[ro rw].include?(mount[:mode]) && host_cache_line?(home, mount)
         warn "~/.cache is this sandbox's own, never the host's; ignored: #{mount[:line]}"
+        warn "  for a copy of it, writable and following the host: copy:#{mount[:line].split(':', 2).last.strip}"
         next
       end
       case mount[:mode]
       when "ro"   then args.push(*ro(path)) if File.exist?(path)
       when "rw"   then bind_rw_mount!(args, path, git_writable: git_rw) if File.exist?(path)
+      when "copy"
+        unless File.directory?(path)
+          warn "Not a directory on the host, not copied: #{mount[:line]}"
+          next
+        end
+        begin
+          bind_copy!(args, path, home)
+        rescue CopyError => e
+          abort "#{e.message}\n  (from .sandbox-mounts: #{mount[:line]})"
+        end
       when "path" then extra_path_dirs << path
       when *NETWORK_MODES then nil # opened by sandbox-agent, see sandbox-network.rb
       else warn "Unknown mount mode '#{mount[:mode]}' in .sandbox-mounts: #{mount[:line]}"

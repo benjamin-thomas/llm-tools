@@ -60,8 +60,9 @@
 #
 # Still granted, for the record: the CLIPBOARD selection through the bridge
 # (an agent can read whatever you copy there, at any time — set
-# PASSWORD_STORE_X_SELECTION=primary to keep `pass -c` out of it), ~/.cache rw
-# bar the caches the host runs code from (host_code_caches), ~/.local ro, audio
+# PASSWORD_STORE_X_SELECTION=primary to keep `pass -c` out of it), the
+# sandboxes' own ~/.cache rw bar the caches tools run code from
+# (host_code_caches), their own copy of each copy: dir rw, ~/.local ro, audio
 # devices, the project dir rw.
 
 require "fileutils"
@@ -100,8 +101,8 @@ if ARGV.first == "share-path"
   puts source
   exit
 end
-# `cache-dir`: the host side of every sandbox's ~/.cache, for a script that
-# copies a cache in from the host's (never the other way round).
+# `cache-dir`: the host side of every sandbox's ~/.cache. To warm a part of it
+# from the host's, declare copy:~/.cache/<it> instead (never the other way).
 if ARGV.first == "cache-dir"
   abort "Usage: sandbox-agent cache-dir" unless ARGV.size == 1
   dir = SandboxLib.sandbox_cache_dir(ENV.fetch("HOME"))
@@ -169,7 +170,7 @@ parser = OptionParser.new do |opts|
   opts.separator ""
   opts.separator "  sandbox-agent cache-dir"
   opts.separator "    Print (and create) the host side of every sandbox's ~/.cache, never"
-  opts.separator "    the host's own: copy a cache in there to warm it, host to sandbox only."
+  opts.separator "    the host's own. To warm a part of it, declare copy:~/.cache/<it>."
   opts.separator ""
   opts.separator "  sandbox-agent doctor <project-dir> [--write]"
   opts.separator "    Report what this project must declare in .sandbox-mounts before it"
@@ -231,8 +232,19 @@ parser = OptionParser.new do |opts|
   opts.separator "Projects can provide a .sandbox-mounts file for extra mounts:"
   opts.separator "  ro:/path          — read-only mount"
   opts.separator "  rw:/path          — read-write mount"
+  opts.separator "  copy:/path        — the sandboxes' own copy of a host dir, read-write at"
+  opts.separator "                      the same path; the host never reads it"
   opts.separator "  path:/path/bin    — add to PATH"
   opts.separator "  (leading ~ is expanded to $HOME)"
+  opts.separator ""
+  opts.separator "copy: is how a toolchain or a cache the host runs code from is writable"
+  opts.separator "inside, the host never running what sandboxes write there (rw: of"
+  opts.separator "~/.cache is ignored: copy: it instead). A launch copies the dir"
+  opts.separator "when it changed on the host (names, sizes, mtimes): a new copy, beside"
+  opts.separator "the old one, which running sandboxes keep; one no sandbox uses is"
+  opts.separator "deleted. Sandboxes share the copy, and what they install stays in it"
+  opts.separator "until the host's changes. Copies are full (bar reflinks, on btrfs/XFS):"
+  opts.separator "each takes the dir's size on disk, twice while a sandbox runs on the old."
   opts.separator ""
   opts.separator "Network: the sandbox has a private network, with no way out but the"
   opts.separator "doors declared in the same file (approved with `allow`, like mounts):"
@@ -295,7 +307,7 @@ parser = OptionParser.new do |opts|
   opts.separator "path:~/.pyenv/bin"
   opts.separator ""
   opts.separator "# Python — uv"
-  opts.separator "rw:~/.cache/uv         # uv needs a writable cache"
+  opts.separator "copy:~/.cache/uv       # warm; without it, uv fills the sandboxes' own"
   opts.separator "ro:~/.local/share/uv"
   opts.separator "path:~/.local/bin"
   opts.separator ""
