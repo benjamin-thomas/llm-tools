@@ -376,3 +376,21 @@ begin
 rescue StandardError
   # a missing transcript or an unwritable cache only costs manage/agents a fetch
 end
+
+# --- Sweep temp files orphaned by a killed render ----------------------------
+#
+# Both caches are written to "<cache>.<pid>" then renamed. A render killed in
+# between leaves that file behind; a write lasts milliseconds, so one an hour
+# old is orphaned, never another session's write in flight. Lock files stay.
+
+STALE_TMP_SECS = 3600
+
+begin
+  Dir.glob(File.join(File.dirname(RATE_LIMITS_CACHE), "*.json.[0-9]*")).each do |path|
+    File.delete(path) if Time.now - File.mtime(path) > STALE_TMP_SECS
+  rescue SystemCallError
+    # already gone: another session swept it first
+  end
+rescue StandardError
+  # an unreadable cache dir: nothing to sweep
+end
