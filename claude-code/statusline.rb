@@ -14,6 +14,7 @@ DIM   = "\033[2m"
 GREEN = "\033[32m"
 AMBER = "\033[33m"
 RED   = "\033[31m"
+BOLD  = "\033[1m"
 FRAME = "\033[38;5;175m" # muted pink: ties the meter brackets to their "left" tag
 RESET = "\033[0m"
 
@@ -64,6 +65,34 @@ def meter(label, pct, tail = "")
 end
 
 DOT = "#{DIM} · #{RESET}"
+
+def tilde(path)
+  home = Dir.home
+  path == home || path.start_with?("#{home}/") ? "~#{path.delete_prefix(home)}" : path
+end
+
+# The last two components: enough to tell same-named repos apart, short
+# enough to fit. "~/code/github.com/me/app" => "me/app".
+def short_path(path)
+  parts = tilde(path).split("/").last(2)
+  parts.empty? ? "/" : parts.join("/")
+end
+
+# Where Claude Code was launched (its project_dir, not the cwd), then where it
+# has cd'd to if that differs. Like a shell prompt, the parent recedes and the
+# project's own name carries it.
+def directory(workspace)
+  launch = workspace && workspace["project_dir"] or return nil
+  path = short_path(launch)
+  name = File.basename(path)
+  shown = "#{DIM}#{path.delete_suffix(name)}#{RESET}#{BOLD}#{name}#{RESET}"
+
+  current = workspace["current_dir"]
+  return shown if current.nil? || current == launch
+
+  inside = current.start_with?("#{launch}/")
+  "#{shown}#{DIM} → #{RESET}#{inside ? current.delete_prefix("#{launch}/") : short_path(current)}"
+end
 
 data = JSON.parse($stdin.read)
 # File.write("/tmp/statusline-debug.json", JSON.pretty_generate(data))
@@ -185,7 +214,14 @@ rescue StandardError
   # no token, no network, unreadable cache: just drop the segment
 end
 
-puts "#{CYAN}#{model}#{RESET}  #{FRAME}⟨ #{RESET}#{meters.join(DOT)}#{FRAME} ⟩ left#{RESET}"
+# The directory heads the status line, its path starting in the meters' column.
+DIR_LABEL = "Project:"
+OPEN = "  ⟨ " # between the model and the meters; the path line pads to match
+dir = directory(data["workspace"])
+width = dir ? [model.length, DIR_LABEL.length].max : 0
+
+puts "#{DIM}#{DIR_LABEL.ljust(width + OPEN.length)}#{RESET}#{dir}" if dir
+puts "#{CYAN}#{model.ljust(width)}#{RESET}#{FRAME}#{OPEN}#{RESET}#{meters.join(DOT)}#{FRAME} ⟩ left#{RESET}"
 
 # --- Line 2: real-API-price spend + token stats ------------------------------
 #
