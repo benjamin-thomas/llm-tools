@@ -238,8 +238,8 @@ parser = OptionParser.new do |opts|
   opts.separator "  (leading ~ is expanded to $HOME)"
   opts.separator ""
   opts.separator "copy: is how a toolchain or a cache the host runs code from is writable"
-  opts.separator "inside, the host never running what sandboxes write there (rw: of"
-  opts.separator "~/.cache is ignored: copy: it instead). A launch copies the dir"
+  opts.separator "inside (rw: of ~/.rbenv, ~/.nvm, ~/.bundle, ~/.ghcup, the cabal config"
+  opts.separator "and store is refused, rw: of ~/.cache ignored). A launch copies the dir"
   opts.separator "when it changed on the host (names, sizes, mtimes): a new copy, beside"
   opts.separator "the old one, which running sandboxes keep; one no sandbox uses is"
   opts.separator "deleted. Sandboxes share the copy, and what they install stays in it"
@@ -272,18 +272,18 @@ parser = OptionParser.new do |opts|
   opts.separator "Typical .sandbox-mounts recipes (lines below are copy-paste ready):"
   opts.separator ""
   opts.separator "# Haskell (ghcup + cabal)"
-  opts.separator "rw:~/.ghcup             # ghcup writes logs/, cache/, tmp/, trash/ (tui needs rw)"
+  opts.separator "ro:~/.ghcup             # copy:~/.ghcup if ghcup itself must run (logs/, tmp/)"
   opts.separator "path:~/.ghcup/bin       # ghc, cabal, hls all live here"
-  opts.separator "rw:~/.config/cabal      # cabal config (XDG layout; classic setups: rw:~/.cabal)"
-  opts.separator "rw:~/.local/state/cabal # cabal store/logs — overrides the ro ~/.local mount"
-  opts.separator "# (the package cache ~/.cache/cabal is auto-mounted)"
+  opts.separator "ro:~/.config/cabal      # cabal config (XDG layout; classic setups: ~/.cabal)"
+  opts.separator "copy:~/.local/state/cabal # cabal store/logs, the sandboxes' own"
+  opts.separator "copy:~/.cache/cabal     # the package index, warm"
   opts.separator ""
   opts.separator "# OCaml (opam)"
   opts.separator "ro:~/.opam"
   opts.separator opam_path_line
   opts.separator ""
   opts.separator "# Node — nvm"
-  opts.separator "ro:~/.nvm"
+  opts.separator "ro:~/.nvm              # copy:~/.nvm for npm install -g"
   opts.separator "path:~/.nvm/versions/node/<version>/bin"
   opts.separator ""
   opts.separator "# Node — volta"
@@ -296,7 +296,7 @@ parser = OptionParser.new do |opts|
   opts.separator ""
   opts.separator "# Rust (rustup + cargo)"
   opts.separator "ro:~/.rustup"
-  opts.separator "rw:~/.cargo            # cargo writes to registry/cache; use ro: if you prefer"
+  opts.separator "copy:~/.cargo          # cargo writes to registry/cache; use ro: if you prefer"
   opts.separator "path:~/.cargo/bin"
   opts.separator ""
   opts.separator "# Go — auto-detected from your PATH; no entry needed (see list above)"
@@ -360,7 +360,7 @@ end
 # Shown at every launch, right where you stop to answer the .git question, until
 # the PENDING items at the top of sandbox-lib.rb are done. Delete it with them.
 pending = <<~TXT
-  ⚠ PENDING sandbox hardening: toolchains (rbenv, nvm, ghcup, caches) are rw
+  ⚠ PENDING sandbox hardening: some toolchains (cargo, asdf, GOPATH...) are rw
     and dev servers may run on the host — sandbox-written code can still run
     outside. See PENDING in sandbox-lib.rb.
 TXT

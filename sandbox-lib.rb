@@ -10,16 +10,17 @@
 # PENDING — known holes, not fixed yet. Agents: when asked to change this file
 # or sandbox-agent, remind the user of these before anything else.
 #
-# 1. Toolchains are writable. Version managers and package caches (rbenv, nvm,
-#    ghcup, bundler, npm/yarn caches, ~/.local/share and the agent binaries
-#    under it) are mounted rw, and the host runs code from them. A sandboxed
-#    agent can plant code there that runs outside the next time the user
-#    invokes ruby, node, claude... on the host. Fix: toolchains ro, libraries
-#    installed per project (vendor/bundle, node_modules). Done for Haskell:
-#    a launch mounting ~/.ghcup or ~/.config/cabal writable is refused
-#    (host_toolchain_paths). Done for ~/.cache: every sandbox gets its own,
-#    and a launch mounting any part of the host's writable is refused (see
-#    "~/.cache"); never undo that to warm a cache, copy it in instead.
+# 1. Some toolchains are still writable. A sandboxed agent that writes where
+#    the host runs code from plants code that runs outside the next time the
+#    user invokes ruby, node, claude... on the host. The fix is copy: (see
+#    "Copies"): the sandboxes get their own copy, writable, and the host never
+#    reads it. Done: a launch mounting writable ghcup, the cabal config and
+#    store, rbenv, bundler or nvm is refused (host_toolchain_paths), as is any
+#    part of the host's ~/.cache (see "~/.cache"). Left: other toolchains a
+#    .sandbox-mounts may still grant rw (cargo, bun, gradle, hex, elm...), and
+#    the ones this code mounts rw itself (asdf, GOPATH, moon, the agents'
+#    binaries under ~/.local/share and their own dirs): add each to
+#    host_toolchain_paths once its projects declare copy: instead.
 #
 # 2. Dev servers may run on the host. Some dev setups start their servers in a
 #    host terminal, from source and node_modules the agent writes: the same
@@ -30,9 +31,9 @@
 #    not on it, or one whose socket moves, is reachable from every sandbox.
 #    Fix: find the sockets under each mounted dir at launch, hide them all.
 #
-# 1 has a rule waiting, commented out, in invariant_violations below (2 lives in
-# each project's setup). sandbox-agent prints a short yellow warning at every
-# launch until both are done.
+# 1 closes one host_toolchain_paths entry at a time (2 lives in each project's
+# setup). sandbox-agent prints a short yellow warning at every launch until
+# both are done.
 # =============================================================================
 
 require "digest"
@@ -337,13 +338,13 @@ module SandboxLib
 
   TOOLCHAIN_HINTS = [
     { glob: "*.cabal",          name: "Haskell (ghcup + cabal)",
-      lines: ["ro:~/.ghcup", "path:~/.ghcup/bin", "ro:~/.config/cabal", "rw:~/.local/state/cabal"] },
+      lines: ["ro:~/.ghcup", "path:~/.ghcup/bin", "ro:~/.config/cabal", "copy:~/.local/state/cabal"] },
     { glob: "cabal.project",    name: "Haskell (ghcup + cabal)",
-      lines: ["ro:~/.ghcup", "path:~/.ghcup/bin", "ro:~/.config/cabal", "rw:~/.local/state/cabal"] },
+      lines: ["ro:~/.ghcup", "path:~/.ghcup/bin", "ro:~/.config/cabal", "copy:~/.local/state/cabal"] },
     { glob: "package.json",     name: "Node — pick your version manager",
-      lines: ["rw:~/.nvm", "path:~/.nvm/versions/node/<version>/bin", "# or volta / fnm — see --help"] },
+      lines: ["copy:~/.nvm", "path:~/.nvm/versions/node/<version>/bin", "# or volta / fnm — see --help"] },
     { glob: "Gemfile",          name: "Ruby (rbenv)",
-      lines: ["rw:~/.rbenv", "rw:~/.bundle", "path:~/.rbenv/shims", "path:~/.rbenv/bin"] },
+      lines: ["copy:~/.rbenv", "copy:~/.bundle", "path:~/.rbenv/shims", "path:~/.rbenv/bin"] },
     { glob: "Cargo.toml",       name: "Rust (rustup + cargo)",
       lines: ["ro:~/.rustup", "rw:~/.cargo", "path:~/.cargo/bin"] },
     { glob: "dune-project",     name: "OCaml (opam)",
@@ -726,12 +727,17 @@ module SandboxLib
     "#{home}/.local/share/gnome-shell/extensions",
   ]
 
-  # Compilers the host builds with: a sandbox that rewrote one would plant code
-  # in whatever the host compiles next. A launch mounting one writable is
-  # refused; libraries stay writable in their own stores (~/.local/state/cabal).
+  # Toolchains the host builds and runs with: compilers, interpreters and the
+  # libraries they load (the cabal store, gems, global npm packages). A sandbox
+  # that wrote one would plant code in whatever the host runs next. A launch
+  # mounting one writable is refused: copy: gives a sandbox its own instead.
   def host_toolchain_paths(home) = [
     "#{home}/.ghcup",
     "#{home}/.config/cabal",
+    "#{home}/.local/state/cabal",
+    "#{home}/.rbenv",
+    "#{home}/.bundle",
+    "#{home}/.nvm",
   ]
 
   # Caches the host runs code from, hidden behind a private tmpfs even inside
@@ -777,6 +783,7 @@ module SandboxLib
   # where its tools look for it, warm, and whatever a sandbox installs there
   # stays in the copy. The host never reads a copy, so nothing flows back: what
   # a sandbox installed reaches the host only when the user installs it there.
+  # This is the one way a host toolchain may be writable (see Invariants).
   #
   # A copy follows the host. At every launch the host tree's manifest (names,
   # types, sizes, mtimes, modes, link targets; about a second for 300k files)
@@ -1056,18 +1063,29 @@ module SandboxLib
       end
     end
 
+    # On the bind sources, symlinks resolved: a copy's generation never lands
+    # on the host's toolchain, whatever path it is bound at.
     host_toolchain_paths(home).each do |tool|
+      real_tool = begin File.realpath(tool) rescue tool end
       # A writable bind of the tool, of a parent or of a part of it, unless a later
       # read-only bind covers that very spot.
       writable = args.each_with_index.any? do |arg, i|
-        next false unless writable_flags.include?(arg) && exposes?(args[i + 1], tool)
+        next false unless writable_flags.include?(arg)
 
-        spot = args[i + 2].start_with?(File.join(tool, "")) ? args[i + 2] : tool
+        src = args[i + 1]
+        real = begin File.realpath(src) rescue src end
+        next false unless [src, real].product([tool, real_tool]).any? { |path, t| exposes?(path, t) }
+
+        # Where it shows inside: the tool itself when a parent of it is bound,
+        # else the destination (a part of it, or a symlink to it bound elsewhere).
+        dest = args[i + 2]
+        spot = tool.start_with?(File.join(dest, "")) ? tool : dest
         writable_flags.include?(effective_bind(args, spot))
       end
       next unless writable
 
-      violations << "#{tool} is writable: the host compiles with it. Declare ro:#{tool.sub(home, '~')} in .sandbox-mounts"
+      short = tool.sub(home, "~")
+      violations << "#{tool} is writable: the host runs what it holds. Declare copy:#{short} (or ro:#{short}) in .sandbox-mounts"
     end
 
     args.each_cons(2) do |flag, name|
@@ -1112,15 +1130,8 @@ module SandboxLib
     violations << "no --clearenv: the host environment would leak in" unless args.include?("--clearenv")
     violations << "no --unshare-net: the sandbox would share the host network" unless args.include?("--unshare-net")
 
-    # PENDING — switch this on once the matching lockdown has landed:
-    #
-    # writable = args.each_cons(2).select { |flag, _| %w[--bind --dev-bind].include?(flag) }.map(&:last)
-    # %W[#{home}/.rbenv #{home}/.nvm #{home}/.ghcup #{home}/.bundle #{home}/.npm
-    #    #{home}/.yarn #{home}/.cargo #{home}/.local/share].each do |toolchain|
-    #   writable.each do |src|
-    #     violations << "rw #{src}: the host runs code from #{toolchain}" if exposes?(src, toolchain)
-    #   end
-    # end
+    # PENDING 1: the toolchains not yet in host_toolchain_paths (~/.npm,
+    # ~/.yarn, ~/.cargo, ~/.local/share...) join it once nothing needs them rw.
 
     violations.uniq
   end

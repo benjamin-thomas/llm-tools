@@ -191,7 +191,27 @@ class SandboxInvariantsTest < Minitest::Test
     refute_empty violations(base + rw("#{@home}/.config/cabal"))
   end
 
-  # A toolchain's copy is writable: its generation, at its path.
+  # The host runs the rubies, gems, nodes and Haskell libraries these hold.
+  def test_host_toolchains_are_never_writable
+    %w[.rbenv .rbenv/versions .nvm .bundle .local/state/cabal].each do |dir|
+      refute_empty violations(base + rw("#{@home}/#{dir}") + hide_daemons), dir
+    end
+    assert_match(/copy:~\/\.rbenv/, violations(base + rw("#{@home}/.rbenv")).join("\n"))
+  end
+
+  def test_host_toolchains_may_be_read
+    assert_empty violations(base + ro("#{@home}/.rbenv") + ro("#{@home}/.nvm") + hide_daemons)
+  end
+
+  # bwrap follows symlinks: a harmless name may land on a toolchain.
+  def test_a_symlink_to_a_host_toolchain_is_never_writable
+    FileUtils.mkdir_p(File.join(@home, ".rbenv"))
+    link = File.join(@home, "project", "rubies")
+    File.symlink(File.join(@home, ".rbenv"), link)
+    refute_empty violations(base + rw(link))
+  end
+
+  # copy: is the one way a toolchain is writable: its generation, at its path.
   def copy_of(path) = File.join(SandboxLib.copy_store(@home), path.delete_prefix("/").tr("/", "-"), "0123abcd")
 
   def test_a_copy_of_a_host_toolchain_may_be_writable

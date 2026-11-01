@@ -25,8 +25,8 @@ class SandboxAgentsTest < Minitest::Test
     ENV["HOME"] = old
   end
 
-  # The host compiles with this GHC and cabal config: a project asking for them
-  # rw is refused, with what to declare instead. Its store may stay writable.
+  # The host compiles with this GHC, cabal config and store: a project asking
+  # for them rw is refused, with what to declare instead.
   def test_haskell_toolchain_declared_rw_is_refused
     Dir.mktmpdir("agents-home-") do |home|
       FileUtils.touch(File.join(home, ".gitconfig")) # required by a launch
@@ -39,21 +39,24 @@ class SandboxAgentsTest < Minitest::Test
           violations = SandboxLib.invariant_violations(args, home: home, uid: Process.uid)
           assert(violations.any? { |v| v.include?("ro:~/.ghcup") })
           assert(violations.any? { |v| v.include?("ro:~/.config/cabal") })
-          refute(violations.any? { |v| v.include?(".local/state/cabal") })
+          assert(violations.any? { |v| v.include?("copy:~/.local/state/cabal") })
         end
       end
     end
   end
 
-  def test_haskell_toolchain_declared_ro_passes_with_a_writable_store
+  # The store writable is the sandboxes' own copy of it: see "Copies".
+  def test_haskell_toolchain_declared_ro_passes_with_a_copied_store
     Dir.mktmpdir("agents-home-") do |home|
       FileUtils.touch(File.join(home, ".gitconfig")) # required by a launch
       %w[.ghcup .config/cabal .local/state/cabal].each { |dir| FileUtils.mkdir_p(File.join(home, dir)) }
       Dir.mktmpdir("agents-project-") do |project|
         File.write(File.join(project, ".sandbox-mounts"),
-                   "ro:~/.ghcup\nro:~/.config/cabal\nrw:~/.local/state/cabal\n")
+                   "ro:~/.ghcup\nro:~/.config/cabal\ncopy:~/.local/state/cabal\n")
         with_home(home) do
-          args = SandboxLib.build_base_args(project, git_rw: false)
+          args = nil
+          capture_io { args = SandboxLib.build_base_args(project, git_rw: false) }
+          SandboxLib::HELD_COPY_LOCKS.each(&:close).clear
           violations = SandboxLib.invariant_violations(args, home: home, uid: Process.uid)
           refute(violations.any? { |v| v.include?("ghcup") || v.include?("cabal") })
         end
