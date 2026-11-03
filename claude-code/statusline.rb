@@ -71,10 +71,10 @@ def tilde(path)
   path == home || path.start_with?("#{home}/") ? "~#{path.delete_prefix(home)}" : path
 end
 
-# The last two components: enough to tell same-named repos apart, short
-# enough to fit. "~/code/github.com/me/app" => "me/app".
+# The last three components: enough to tell same-named repos apart, short
+# enough to fit. "~/code/github.com/me/app" => "github.com/me/app".
 def short_path(path)
-  parts = tilde(path).split("/").last(2)
+  parts = tilde(path).split("/").last(3)
   parts.empty? ? "/" : parts.join("/")
 end
 

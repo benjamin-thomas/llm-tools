@@ -65,7 +65,7 @@ class StatuslineFirstLineTest(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("ruby"), "ruby not installed")
 class StatuslineDirectoryTest(unittest.TestCase):
-    """The launch directory heads the status line, cut to its last two path
+    """The launch directory heads the status line, cut to its last three path
     components, starting in the meters' column. A cd away from it follows."""
 
     def render(self, workspace: dict[str, str], model: str = "Opus 5.5") -> list[str]:
@@ -78,26 +78,26 @@ class StatuslineDirectoryTest(unittest.TestCase):
 
     def test_launch_directory_above_the_model_line(self) -> None:
         out = self.render({"project_dir": "~/code/github.com/me/app", "current_dir": "~/code/github.com/me/app"})
-        self.assertEqual(out[0], "Project:    me/app")
+        self.assertEqual(out[0], "Project:    github.com/me/app")
         self.assertTrue(out[1].startswith("Opus 5.5  ⟨ ctx:"), out[1])
 
     def test_path_aligns_with_meters_whichever_label_is_longer(self) -> None:
         for model in ("Haiku", "Sonnet 5.5"):
             out = self.render({"project_dir": "~/code/app"}, model)
-            self.assertEqual(out[1].index("ctx:"), out[0].index("code/app"), out)
+            self.assertEqual(out[1].index("ctx:"), out[0].index("~/code/app"), out)
 
     def test_short_paths_stay_whole(self) -> None:
-        for launch, shown in (("/", "/"), ("/usr", "/usr"), ("~", "~"), ("~/app", "~/app")):
+        for launch, shown in (("/", "/"), ("/usr", "/usr"), ("~", "~"), ("~/app", "~/app"), ("~/code/app", "~/code/app")):
             out = self.render({"project_dir": launch})
             self.assertEqual(out[0], f"Project:    {shown}")
 
     def test_current_directory_inside_project_is_relative(self) -> None:
         out = self.render({"project_dir": "~/code/me/app", "current_dir": "~/code/me/app/src"})
-        self.assertEqual(out[0], "Project:    me/app → src")
+        self.assertEqual(out[0], "Project:    code/me/app → src")
 
     def test_current_directory_outside_project_is_cut_too(self) -> None:
         out = self.render({"project_dir": "~/code/me/app", "current_dir": "~/code/me/lib"})
-        self.assertEqual(out[0], "Project:    me/app → me/lib")
+        self.assertEqual(out[0], "Project:    code/me/app → code/me/lib")
 
     def test_no_workspace_no_directory_line(self) -> None:
         out = self.render({})
