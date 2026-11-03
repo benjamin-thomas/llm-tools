@@ -85,6 +85,13 @@ def _limits_from(
     as_of = parse_iso(stamp)
     if as_of is None:
         return None
+    return limits_from_buckets(limits, as_of, now)
+
+
+def limits_from_buckets(
+    limits: dict[str, Any], as_of: datetime, now: datetime
+) -> CodexLimits | None:
+    """Buckets as the log names them: window_minutes, resets_at, used_percent."""
     weekly = _bucket(limits, weekly=True)
     if weekly is None:
         return None

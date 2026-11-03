@@ -11,8 +11,9 @@ from unittest import mock
 
 from zoneinfo import ZoneInfo
 
-from token_recap import anthropic_usage, xai_usage as xai
+from token_recap import anthropic_usage, openai_usage, xai_usage as xai
 from token_recap.anthropic_usage import best_claude_limits, claude_limits
+from token_recap.openai_usage import best_codex_limits, codex_usage
 from token_recap.xai_usage import xai_usage
 
 PARIS = ZoneInfo("Europe/Paris")
@@ -361,3 +362,109 @@ class ClaudeUsageCacheTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# What chatgpt.com/backend-api/wham/usage answered for a Pro Lite plan on
+# 2026-11-03: a weekly window only, no 5h one.
+CODEX_PAYLOAD: dict[str, Any] = {
+    "plan_type": "prolite",
+    "rate_limit": {
+        "allowed": True,
+        "limit_reached": False,
+        "primary_window": {
+            "used_percent": 12,
+            "limit_window_seconds": 604800,
+            "reset_after_seconds": 400000,
+            "reset_at": int(datetime(2026, 9, 3, 12, 0, tzinfo=PARIS).timestamp()),
+        },
+        "secondary_window": None,
+    },
+}
+
+
+class CodexUsageTest(unittest.TestCase):
+    def _auth(self, tmp: str, blob: dict[str, Any] | None = None) -> Path:
+        path = Path(tmp) / "auth.json"
+        default = {"auth_mode": "chatgpt", "tokens": {"access_token": "t", "account_id": "a"}}
+        path.write_text(json.dumps(blob if blob is not None else default))
+        return path
+
+    def test_a_weekly_only_plan_has_no_short_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(openai_usage, "_fetch", return_value=CODEX_PAYLOAD):
+                got = codex_usage(self._auth(tmp), NOW, cache=Path(tmp) / "c.json")
+        assert got is not None
+        self.assertAlmostEqual(got.used, 0.12)
+        self.assertEqual(got.window.end - got.window.start, timedelta(days=7))
+        self.assertEqual(got.window.end, datetime(2026, 9, 3, 12, 0, tzinfo=PARIS))
+        self.assertIsNone(got.short)
+        self.assertEqual(got.as_of, NOW)
+
+    def test_a_five_hour_window_is_read_as_the_short_one(self) -> None:
+        payload = json.loads(json.dumps(CODEX_PAYLOAD))
+        payload["rate_limit"]["secondary_window"] = payload["rate_limit"]["primary_window"]
+        payload["rate_limit"]["primary_window"] = {
+            "used_percent": 40,
+            "limit_window_seconds": 18000,
+            "reset_at": int((NOW + timedelta(hours=2)).timestamp()),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(openai_usage, "_fetch", return_value=payload):
+                got = codex_usage(self._auth(tmp), NOW, cache=Path(tmp) / "c.json")
+        assert got is not None and got.short is not None
+        self.assertAlmostEqual(got.used, 0.12)
+        self.assertAlmostEqual(got.short[0], 0.40)
+        self.assertEqual(got.short[1], NOW + timedelta(hours=2))
+
+    def test_a_recent_answer_is_reused_and_an_old_one_kept_when_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            auth, cache = self._auth(tmp), Path(tmp) / "c.json"
+            with mock.patch.object(openai_usage, "_fetch", return_value=CODEX_PAYLOAD) as fetch:
+                codex_usage(auth, NOW, cache=cache)
+                codex_usage(auth, NOW + timedelta(minutes=1), cache=cache)
+            self.assertEqual(fetch.call_count, 1)
+            later = NOW + timedelta(hours=1)
+            with mock.patch.object(openai_usage, "_fetch", return_value=None):
+                kept = codex_usage(auth, later, cache=cache)
+        assert kept is not None
+        self.assertAlmostEqual(kept.used, 0.12)
+        self.assertEqual(kept.as_of, NOW)  # says how old it is
+
+    def test_only_a_chatgpt_login_is_worth_sending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = self._auth(tmp, {"auth_mode": "apikey", "OPENAI_API_KEY": "sk"})
+            self.assertIsNone(openai_usage._credentials(auth))
+
+    def test_a_network_failure_is_not_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = self._auth(tmp)
+            with mock.patch.object(
+                openai_usage.urllib.request, "urlopen", side_effect=urllib.error.URLError("down")
+            ):
+                self.assertIsNone(codex_usage(auth, NOW, cache=Path(tmp) / "c.json"))
+
+    def test_the_live_answer_beats_an_older_logged_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = Path(tmp) / "sessions"
+            path = sessions / "r.jsonl"
+            path.parent.mkdir()
+            logged = {
+                "timestamp": "2026-08-29T10:00:00.000Z",
+                "type": "event_msg",
+                "payload": {"type": "token_count", "rate_limits": {"primary": {
+                    "window_minutes": 43200,
+                    "resets_at": int((NOW + timedelta(days=20)).timestamp()),
+                    "used_percent": 3,
+                }}},
+            }
+            path.write_text(json.dumps(logged) + "\n")
+            cache = Path(tmp) / "c.json"
+            with mock.patch.object(openai_usage, "_fetch", return_value=CODEX_PAYLOAD):
+                live = best_codex_limits(self._auth(tmp), sessions, NOW, cache=cache)
+            with mock.patch.object(openai_usage, "_fetch", return_value=None):
+                offline = best_codex_limits(
+                    self._auth(tmp), sessions, NOW, offline=True, cache=Path(tmp) / "none.json"
+                )
+        assert live is not None and offline is not None
+        self.assertAlmostEqual(live.used, 0.12)
+        self.assertAlmostEqual(offline.used, 0.03)

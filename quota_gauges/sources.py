@@ -1,7 +1,7 @@
 """Each provider's meter, turned into Gauges.
 
-The readings themselves live in token_recap (anthropic_usage, hyper_usage,
-mistral_usage), which both tools share. The mapping here is pure and takes
+The readings themselves live in token_recap (anthropic_usage, openai_usage,
+hyper_usage, mistral_usage), which both tools share. The mapping here is pure and takes
 whatever the fetch produced (or None), so every source is testable offline.
 """
 
@@ -13,6 +13,7 @@ from typing import Any
 
 from quota_gauges.gauge import Gauge
 from token_recap.anthropic_usage import ClaudeLimits
+from token_recap.codex import CodexLimits
 from token_recap.hyper_usage import HYPER_DAILY, hyper_used
 from token_recap.mistral_usage import READING, extension_error, mistral_budget, read_reading
 from token_recap.windows import hyper_window
@@ -53,6 +54,27 @@ def claude_gauges(
         as_of=limits.as_of,
     )
     return [five, weekly]
+
+
+def codex_gauges(
+    limits: CodexLimits | None, now: datetime, problem: str = ""
+) -> list[Gauge]:
+    """The week, preceded by a 5h window only on plans that have one: Pro
+    Lite has none."""
+    if limits is None:
+        return [Gauge("codex-week", "Codex week", None, problem=problem)]
+    gauges: list[Gauge] = []
+    if limits.short is not None:
+        used, resets = limits.short
+        gauges.append(Gauge(
+            "codex-5h", "Codex 5h", used, resets - _FIVE_HOURS, resets,
+            paced=False, as_of=limits.as_of,
+        ))
+    gauges.append(Gauge(
+        "codex-week", "Codex week", limits.used,
+        limits.window.start, limits.window.end, as_of=limits.as_of,
+    ))
+    return gauges
 
 
 def hyper_gauge(balance: float | None, now: datetime, problem: str = "") -> Gauge:

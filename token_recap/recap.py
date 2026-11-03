@@ -10,7 +10,8 @@ from zoneinfo import ZoneInfo
 from token_recap.buckets import TokenBuckets
 from token_recap.anthropic_usage import ClaudeLimits, best_claude_limits
 from token_recap.claude import collect_claude
-from token_recap.codex import CodexLimits, codex_limits, collect_codex
+from token_recap.codex import CodexLimits, collect_codex
+from token_recap.openai_usage import AUTH as CODEX_AUTH, best_codex_limits
 from token_recap.format import Meter, ProviderView, render_report
 from token_recap.grok import GrokLimits, collect_grok, grok_limits
 from token_recap.hyper_usage import (
@@ -244,11 +245,12 @@ def recap_text(
     hyper_auth: Path = OPENCODE_AUTH,
     mistral_reading: Path = READING,
     hyper_balance: Callable[[str], float | None] = fetch_hyper_balance,
+    codex_auth: Path = CODEX_AUTH,
 ) -> str:
     key = hyper_key(os.environ, hyper_auth)
     reading = read_reading(mistral_reading)
     balance = None if offline or key is None else hyper_balance(key)
-    codex_seen: CodexLimits | None = codex_limits(codex_root, now)
+    codex_seen: CodexLimits | None = best_codex_limits(codex_auth, codex_root, now, offline)
     claude_seen: ClaudeLimits | None = best_claude_limits(claude_credentials, now, offline)
     grok_seen: GrokLimits | None = grok_limits(grok_log, now)
     # The logged copy is only as fresh as the last time Grok ran, so ask.

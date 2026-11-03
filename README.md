@@ -121,6 +121,9 @@ Hyper's billing month from the 12th), priced at each provider's API list rate.
 Each box's `used` bar is the provider's own meter (Hyper's is daily, from
 16:33 UTC), with a tick where an even pace would be.
 `quota-gauges` prints just those meters, one line each (`--json` for scripts).
+Codex's is asked of the endpoint behind its `/status` screen, with the login
+in `~/.codex/auth.json`, and falls back to the last one Codex logged. The
+token is never refreshed here: Codex owns that, so run Codex if it expires.
 
 Mistral serves its Vibe budget only to a logged-in browser, so a Chrome
 extension reads it with your session and a native messaging host keeps it in

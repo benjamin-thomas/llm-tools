@@ -265,6 +265,7 @@ class HyperReportTest(unittest.TestCase):
                 hyper_auth=self._hyper_auth(tmp),
                 mistral_reading=self._mistral_reading(tmp, mistral),
                 hyper_balance=lambda key: balance,
+                codex_auth=gone,
             )
 
     @staticmethod

@@ -17,11 +17,12 @@ from quota_gauges.gauge import (
     runs_out_at,
     tone,
 )
-from quota_gauges.sources import claude_gauges, hyper_gauge, mistral_gauge, read_mistral, record_balance
+from quota_gauges.sources import claude_gauges, codex_gauges, hyper_gauge, mistral_gauge, read_mistral, record_balance
 from token_recap.hyper_usage import hyper_key
 from token_recap.windows import hyper_window
 from quota_gauges.cli import as_json, render_line
 from token_recap.anthropic_usage import ClaudeLimits, limits_from_statusline
+from token_recap.codex import CodexLimits
 from token_recap.windows import Window
 
 PARIS = ZoneInfo("Europe/Paris")
@@ -176,6 +177,30 @@ class ClaudeSourceTest(unittest.TestCase):
         for gauge in gauges:
             self.assertIsNone(gauge.used)
             self.assertEqual(gauge.problem, "usage endpoint unreachable")
+
+
+class CodexSourceTest(unittest.TestCase):
+    def _limits(self, short: tuple[float, datetime] | None) -> CodexLimits:
+        window = Window("Tue 12:00 live", TUESDAY, TUESDAY + timedelta(days=7))
+        return CodexLimits(window, 0.3, NOW, short)
+
+    def test_a_weekly_only_plan_gives_one_paced_gauge(self) -> None:
+        (weekly,) = codex_gauges(self._limits(None), NOW)
+        self.assertEqual((weekly.key, weekly.used, weekly.paced), ("codex-week", 0.3, True))
+        self.assertEqual((weekly.start, weekly.end), (TUESDAY, TUESDAY + timedelta(days=7)))
+        self.assertEqual(weekly.as_of, NOW)
+
+    def test_a_short_window_comes_first_and_unpaced(self) -> None:
+        resets = NOW + timedelta(hours=2)
+        five, weekly = codex_gauges(self._limits((0.4, resets)), NOW)
+        self.assertEqual((five.key, five.used, five.paced), ("codex-5h", 0.4, False))
+        self.assertEqual(five.end, resets)
+        self.assertEqual(weekly.key, "codex-week")
+
+    def test_no_reading_says_why(self) -> None:
+        (weekly,) = codex_gauges(None, NOW, problem="not logged in")
+        self.assertIsNone(weekly.used)
+        self.assertEqual(weekly.problem, "not logged in")
 
 
 # The shape statusline.rb writes (see its RATE_LIMITS_CACHE).

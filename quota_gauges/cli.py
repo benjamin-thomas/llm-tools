@@ -20,6 +20,7 @@ from quota_gauges.install import DEST, install
 from quota_gauges.sources import (
     HYPER_LOG,
     claude_gauges,
+    codex_gauges,
     hyper_gauge,
     mistral_gauge,
     read_mistral,
@@ -28,9 +29,11 @@ from quota_gauges.sources import (
 from token_recap.anthropic_usage import best_claude_limits
 from token_recap.format import fmt_span
 from token_recap.hyper_usage import fetch_hyper_balance, hyper_key
+from token_recap.openai_usage import AUTH as CODEX_AUTH, best_codex_limits
 from token_recap.windows import aware_local, local_tz
 
 CLAUDE_CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
+CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 BAR_WIDTH = 20
 _COLOURS = {"under": "34", "ok": "32", "warn": "33", "over": "31", "stale": "2", "unknown": "2"}
 
@@ -38,6 +41,10 @@ _COLOURS = {"under": "34", "ok": "32", "warn": "33", "over": "31", "stale": "2",
 def collect(now: datetime) -> list[Gauge]:
     """Every gauge, each source failing on its own without sinking the rest."""
     gauges = claude_gauges(best_claude_limits(CLAUDE_CREDENTIALS, now), now, problem="no reading: no session open and usage endpoint unreachable")
+    gauges += codex_gauges(
+        best_codex_limits(CODEX_AUTH, CODEX_SESSIONS, now), now,
+        problem="no reading: not logged in to Codex, or its token expired (run codex)",
+    )
     key = hyper_key(os.environ)
     if key is None:
         gauges.append(hyper_gauge(None, now, problem="no Hyper API key"))
@@ -151,7 +158,7 @@ def as_json(gauges: list[Gauge], now: datetime) -> list[dict[str, Any]]:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        description="Subscription meters against an even pace: Claude, Hyper, Mistral."
+        description="Subscription meters against an even pace: Claude, Codex, Hyper, Mistral."
     )
     p.add_argument(
         "command",
