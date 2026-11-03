@@ -32,8 +32,9 @@ class Gauge:
     used: float | None  # 0..1, or None when the provider gave no reading
     start: datetime | None = None
     end: datetime | None = None  # the reset
-    # Whether an even pace means anything. The 5h window opens on the first
-    # message, so being "behind" it is meaningless.
+    # Whether the verdict (tone, room, outlook) goes by pace. The 5h window
+    # opens on the first message, so being "behind" it is meaningless: it goes
+    # by how full it is, and its pace is only drawn, as a tick to keep behind.
     paced: bool = True
     detail: str = ""
     as_of: datetime | None = None  # when the reading was taken, if not live

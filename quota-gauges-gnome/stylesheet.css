@@ -1,7 +1,7 @@
 /* Loaded by GNOME Shell with the extension. Colours that follow a gauge's
    tone or brand are set inline from extension.js; these are the fixed ones. */
 
-/* In the top bar: an initial and its bar — three times. */
+/* In the top bar: an initial and its bar, once per subscription. */
 .qg-initial {
   font-weight: bold;
   margin-left: 16px;
@@ -52,4 +52,23 @@
 
 .qg-dim {
   color: #9a9996;
+}
+
+/* Under Claude's card: its 5h window, smaller. */
+.qg-five {
+  spacing: 10px;
+}
+
+.qg-five-name {
+  font-weight: bold;
+  font-size: 0.9em;
+}
+
+.qg-five-bar {
+  width: 140px;
+  height: 6px;
+}
+
+.qg-five-text {
+  font-size: 0.9em;
 }

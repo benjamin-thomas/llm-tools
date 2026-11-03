@@ -384,12 +384,21 @@ class RenderTest(unittest.TestCase):
         self.assertIn("-16 over", line)
         self.assertIn("out Mon 05:24", line)
 
-    def test_an_unpaced_line_has_no_pace(self) -> None:
+    def test_an_unpaced_line_marks_the_even_pace_but_says_nothing_of_it(self) -> None:
+        """The tick still shows a session going too fast; words like "room"
+        would only tell off a window that opened on an idle hour."""
         five = Gauge("claude-5h", "Claude 5h", 0.4, NOW - timedelta(hours=1), NOW + timedelta(hours=4), paced=False)
         line = render_line(five, NOW)
         self.assertNotIn("pace", line)
-        self.assertNotIn("│", line)
+        self.assertIn("┃", line)  # 20% of the window gone, inside the 40% fill
         self.assertIn("resets in 4h 0m", line)
+
+    def test_json_gives_an_unpaced_gauge_its_elapsed_share_and_no_verdict_on_it(self) -> None:
+        five = Gauge("claude-5h", "Claude 5h", 0.4, NOW - timedelta(hours=1), NOW + timedelta(hours=4), paced=False)
+        got = as_json([five], NOW)[0]
+        self.assertAlmostEqual(got["elapsed"], 0.2)
+        self.assertIsNone(got["margin"])
+        self.assertEqual(got["tone"], "ok")  # by how full it is, not by pace
 
     def test_a_missing_reading_says_why(self) -> None:
         line = render_line(mistral_gauge(None, NOW), NOW)

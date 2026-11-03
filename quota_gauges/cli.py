@@ -110,9 +110,8 @@ def render_line(gauge: Gauge, now: datetime) -> str:
     head = f"{gauge.label:<14}"
     if gauge.used is None:
         return f"{head}{bar(0.0, None, BAR_WIDTH)}   --  {gauge.problem}"
-    pace = elapsed(gauge, now) if gauge.paced else None
     said = phrases(gauge, now)
-    parts = [f"{head}{bar(gauge.used, pace, BAR_WIDTH)} {gauge.used * 100:>4.0f}%"]
+    parts = [f"{head}{bar(gauge.used, elapsed(gauge, now), BAR_WIDTH)} {gauge.used * 100:>4.0f}%"]
     parts += [said[k] for k in ("pace", "room", "outlook") if said[k]]
     if gauge.detail:
         parts.append(gauge.detail)
@@ -139,7 +138,8 @@ def as_json(gauges: list[Gauge], now: datetime) -> list[dict[str, Any]]:
             "key": g.key,
             "label": g.label,
             "used": g.used,
-            "elapsed": elapsed(g, now) if g.paced else None,
+            # Even unpaced: the panel marks where an even pace would be.
+            "elapsed": elapsed(g, now),
             "margin": margin(g, now) if g.paced else None,
             "projected": projected(g, now) if g.paced else None,
             "runs_out_at": stamp(runs_out_at(g, now)),
