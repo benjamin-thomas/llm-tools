@@ -102,7 +102,9 @@ class AgentCatalogTest < Minitest::Test
   end
 
   # A model without variants has a single effort, so there is nothing to pin:
-  # it is offered at "default" and started without a #variant.
+  # it is offered at "default" and started without a #variant. mini refuses a
+  # positional prompt: the line ends with --prompt, so the first prompt a
+  # caller appends as one more argument is its value.
   def test_opencode_offers_its_models_at_their_variants
     host = opencode_host(JSON.generate("data" => [
       { "id" => "zai-glm-5-3", "providerID" => "mistral", "variants" => [{ "id" => "low" }, { "id" => "high" }] },
@@ -113,11 +115,11 @@ class AgentCatalogTest < Minitest::Test
     assert_includes lines(host),
                     "opencode:mistral/zai-glm-5-3:high\t/new\tenv " \
                     "OPENCODE_CLI_CONFIG_CONTENT\\=\\{\\\"session\\\":\\{\\\"permissions\\\":\\\"autoaccept\\\"\\}\\} " \
-                    "opencode mini --standalone --model mistral/zai-glm-5-3\\#high"
+                    "opencode mini --standalone --model mistral/zai-glm-5-3\\#high --prompt"
     assert_includes lines(host),
                     "opencode:hyper/plain:default\t/new\tenv " \
                     "OPENCODE_CLI_CONFIG_CONTENT\\=\\{\\\"session\\\":\\{\\\"permissions\\\":\\\"autoaccept\\\"\\}\\} " \
-                    "opencode mini --standalone --model hyper/plain"
+                    "opencode mini --standalone --model hyper/plain --prompt"
   end
 
   # A provider lists models no coding agent can run: embeddings, which call no
@@ -157,7 +159,7 @@ class AgentCatalogTest < Minitest::Test
                     "opencode-free:opencode/glm-5.3-flash-free:high\t/new\tenv " \
                     "XDG_CONFIG_HOME=#{Dir.home}/.config-free " \
                     "OPENCODE_CLI_CONFIG_CONTENT\\=\\{\\\"session\\\":\\{\\\"permissions\\\":\\\"autoaccept\\\"\\}\\} " \
-                    "opencode mini --standalone --model opencode/glm-5.3-flash-free\\#high"
+                    "opencode mini --standalone --model opencode/glm-5.3-flash-free\\#high --prompt"
   end
 
   def pi_host(settings = nil)

@@ -125,15 +125,18 @@ module AgentCatalog
     when "opencode"
       # mini, not the TUI: only mini takes the #variant (see the header). The
       # inline CLI config auto-accepts permissions — the sandbox is the
-      # boundary, as for the other harnesses.
+      # boundary, as for the other harnesses. mini refuses a positional
+      # prompt: the line ends with --prompt, whose value is the first prompt
+      # a caller appends.
       %W[env OPENCODE_CLI_CONFIG_CONTENT={"session":{"permissions":"autoaccept"}} opencode mini --standalone
-         --model #{AgentCatalog.opencode_model(model, effort)}]
+         --model #{AgentCatalog.opencode_model(model, effort)} --prompt]
     when "opencode-free"
       # The wrapper's config home, but not its OPENCODE_DB: that path is
       # read-only in a sandbox, whose own opencode data dir is the writable one.
+      # Its prompt as opencode's.
       %W[env XDG_CONFIG_HOME=#{FREE_CONFIG_HOME}
          OPENCODE_CLI_CONFIG_CONTENT={"session":{"permissions":"autoaccept"}} opencode mini --standalone
-         --model #{AgentCatalog.opencode_model(model, effort)}]
+         --model #{AgentCatalog.opencode_model(model, effort)} --prompt]
     end
   end
 
