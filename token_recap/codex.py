@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from token_recap.buckets import TokenBuckets
 from token_recap.native import CODEX_FALLBACK, codex_native_usd
@@ -13,6 +13,8 @@ from token_recap.windows import Window
 
 # A rate_limits bucket at least this wide is the weekly one, not the 5h one.
 _WEEKLY_MINUTES = 1440
+# The only rollout lines the usage parser reads; the rest is skipped unparsed.
+_USAGE_LINES = ('"turn_context"', "token_count", "token_usage_record")
 
 
 @dataclass(frozen=True)
@@ -135,16 +137,25 @@ def _bucket(
 
 
 def collect_codex(root: Path, start: datetime, end: datetime) -> TokenBuckets:
-    buckets = TokenBuckets()
     if not root.is_dir():
-        return buckets
+        return TokenBuckets()
     start_ts = start.timestamp()
+    recent: list[Path] = []
     for path in root.rglob("*.jsonl"):
         try:
-            if path.stat().st_mtime < start_ts - 120:
-                continue
+            if path.stat().st_mtime >= start_ts - 120:
+                recent.append(path)
         except OSError:
             continue
+    return collect_codex_files(recent, start, end)
+
+
+def collect_codex_files(
+    paths: Iterable[Path], start: datetime, end: datetime
+) -> TokenBuckets:
+    """The usage of these rollouts only: one session's, not a whole root's."""
+    buckets = TokenBuckets()
+    for path in paths:
         _read_codex_jsonl(path, start, end, buckets)
     return buckets
 
@@ -158,6 +169,11 @@ def _read_codex_jsonl(
     track the running value. Turns logged before the first `turn_context` (old
     rollouts predating the field) are backfilled with the session's first known
     model, which is right unless the model was switched mid-session.
+
+    From Codex 0.166 on, every model response also leaves a `token_usage_record`
+    naming its response id. Those are what we sum when a rollout has any: the
+    `token_count` notifications skip the call that compacts the context (the
+    one after it reports nothing, and rolls the running total back).
     """
     try:
         fh = path.open()
@@ -167,9 +183,11 @@ def _read_codex_jsonl(
     first: str | None = None
     previous_total: str | None = None
     rows: list[tuple[str | None, int, int, int, int, int]] = []
+    records: list[tuple[str | None, int, int, int, int, int]] = []
+    responses: set[str] = set()
     with fh:
         for line in fh:
-            if '"turn_context"' not in line and "token_count" not in line:
+            if not any(kind in line for kind in _USAGE_LINES):
                 continue
             try:
                 obj: Any = json.loads(line)
@@ -183,6 +201,17 @@ def _read_codex_jsonl(
                 if model:
                     current = model
                     first = first or model
+                continue
+            if obj.get("type") == "token_usage_record":
+                response = as_str(payload.get("response_id"))
+                usage = payload.get("usage")
+                ts = parse_iso(as_str(obj.get("timestamp")))
+                if response in responses or not isinstance(usage, dict):
+                    continue
+                if response:
+                    responses.add(response)
+                if ts is not None and in_window(ts, start, end):
+                    records.append((current, *_buckets(usage)))
                 continue
             if obj.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue
@@ -205,22 +234,8 @@ def _read_codex_jsonl(
             ts = parse_iso(as_str(obj.get("timestamp")))
             if ts is None or not in_window(ts, start, end):
                 continue
-            inp = as_int(last.get("input_tokens"))
-            cached = as_int(last.get("cached_input_tokens"))
-            written = as_int(last.get("cache_write_input_tokens"))
-            # input_tokens is the whole prompt: cache reads and writes included.
-            uncached = max(inp - cached - written, 0)
-            rows.append(
-                (
-                    current,
-                    uncached,
-                    written,
-                    cached,
-                    as_int(last.get("output_tokens")),
-                    as_int(last.get("reasoning_output_tokens")),
-                )
-            )
-    for model, uncached, cache_write, cached, output, reasoning in rows:
+            rows.append((current, *_buckets(last)))
+    for model, uncached, cache_write, cached, output, reasoning in records or rows:
         name = model or first or CODEX_FALLBACK
         buckets.add(
             uncached=uncached,
@@ -232,3 +247,15 @@ def _read_codex_jsonl(
             model=name,
             provider="openai",
         )
+
+
+def _buckets(usage: dict[str, Any]) -> tuple[int, int, int, int, int]:
+    """(uncached, cache write, cache read, output, reasoning) of one response."""
+    inp = as_int(usage.get("input_tokens"))
+    cached = as_int(usage.get("cached_input_tokens"))
+    written = as_int(usage.get("cache_write_input_tokens"))
+    # input_tokens is the whole prompt: cache reads and writes included.
+    uncached = max(inp - cached - written, 0)
+    output = as_int(usage.get("output_tokens"))
+    reasoning = as_int(usage.get("reasoning_output_tokens"))
+    return (uncached, written, cached, output, reasoning)

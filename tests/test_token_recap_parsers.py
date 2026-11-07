@@ -9,7 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from token_recap.claude import collect_claude
-from token_recap.codex import codex_limits, collect_codex
+from token_recap.codex import codex_limits, collect_codex, collect_codex_files
 from token_recap.grok import collect_grok, grok_limits
 
 PARIS = ZoneInfo("Europe/Paris")
@@ -294,6 +294,59 @@ class CodexNotificationTest(unittest.TestCase):
         self.assertEqual(got.uncached, 100)
         self.assertEqual(got.cache_write, 300)
         self.assertEqual(got.cache_read, 600)
+
+
+class CodexUsageRecordTest(unittest.TestCase):
+    """Codex 0.166 logs a token_usage_record per model response, compaction included."""
+
+    @staticmethod
+    def _record(ts: str, response: str, inp: int, cached: int, out: int) -> dict[str, object]:
+        usage = {"input_tokens": inp, "cached_input_tokens": cached, "cache_write_input_tokens": 0,
+                 "output_tokens": out, "reasoning_output_tokens": 0}
+        return {"timestamp": ts, "type": "token_usage_record",
+                "payload": {"response_id": response, "usage": usage}}
+
+    @staticmethod
+    def _count(ts: str, cumulative: int, inp: int, cached: int, out: int) -> dict[str, object]:
+        return {"timestamp": ts, "type": "event_msg",
+                "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": cumulative},
+                    "last_token_usage": {"input_tokens": inp, "cached_input_tokens": cached,
+                                         "output_tokens": out}}}}
+
+    def _collect(self, rows: list[dict[str, object]]):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            return collect_codex_files([path], START, END)
+
+    def test_the_records_count_the_compaction_call_the_notifications_miss(self) -> None:
+        got = self._collect([
+            turn_context("gpt-6-astra"),
+            self._record("2026-08-21T18:00:00.000Z", "r1", 1000, 800, 10),
+            self._count("2026-08-21T18:00:00.100Z", 1000, 1000, 800, 10),
+            # the compaction call: a record, and no token_count after it
+            self._record("2026-08-21T18:01:00.000Z", "r2", 2000, 1500, 50),
+            self._count("2026-08-21T18:01:00.100Z", 1000, 0, 0, 0),
+            self._record("2026-08-21T18:02:00.000Z", "r3", 300, 200, 5),
+            self._count("2026-08-21T18:02:00.100Z", 1300, 300, 200, 5),
+        ])
+        self.assertEqual(got.calls, 3)
+        self.assertEqual(got.uncached, 200 + 500 + 100)
+        self.assertEqual(got.cache_read, 800 + 1500 + 200)
+        self.assertEqual(got.output, 65)
+        self.assertEqual(set(got.models), {"gpt-6-astra"})
+
+    def test_a_response_logged_twice_counts_once(self) -> None:
+        got = self._collect([
+            self._record("2026-08-21T18:00:00.000Z", "r1", 100, 0, 10),
+            self._record("2026-08-21T18:00:00.000Z", "r1", 100, 0, 10),
+        ])
+        self.assertEqual(got.calls, 1)
+
+    def test_older_rollouts_without_records_still_use_the_notifications(self) -> None:
+        got = self._collect([self._count("2026-08-21T18:00:00.000Z", 100, 100, 40, 10)])
+        self.assertEqual((got.calls, got.uncached, got.cache_read, got.output), (1, 60, 40, 10))
 
 
 class CodexLimitWindowTest(unittest.TestCase):
