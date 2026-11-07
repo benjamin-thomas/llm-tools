@@ -8,6 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from token_recap.buckets import TokenBuckets
+from token_recap.catalogue import refresh_catalogue
 from token_recap.anthropic_usage import ClaudeLimits, best_claude_limits
 from token_recap.claude import collect_claude
 from token_recap.codex import CodexLimits, collect_codex
@@ -77,7 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--offline",
         action="store_true",
-        help="Ask no meter over the network (Claude's endpoint, Grok, Hyper).",
+        help="Ask nothing over the network: no meter (Claude's endpoint, Grok, Hyper), "
+        "no daily refresh of the models.dev prices.",
     )
     p.add_argument(
         "--grok-log",
@@ -347,6 +349,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     tz = ZoneInfo(args.tz) if args.tz else local_tz()
     now = aware_local(None, tz)
+    if not args.offline:
+        refresh_catalogue()
     print(
         recap_text(
             now,

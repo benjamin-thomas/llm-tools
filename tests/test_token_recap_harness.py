@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -22,7 +23,7 @@ from token_recap.harness import (
     split_free,
 )
 from token_recap.buckets import TokenBuckets
-from token_recap.catalogue import catalogue_rates
+from token_recap.catalogue import catalogue_rates, newest_catalogue, refresh_catalogue
 from token_recap.harness import display_rates
 from token_recap.opencode import collect_opencode
 from token_recap.pi import collect_pi
@@ -435,6 +436,67 @@ class CatalogueTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cat, ovr = self._files(tmp)
             self.assertIsNone(catalogue_rates("elsewhere", "some-model", cat, ovr))
+
+
+class CatalogueRefreshTest(unittest.TestCase):
+    """Our own copy of models.dev, fetched again once a day."""
+
+    NOW = 1_800_000_000.0
+    OLD = {"openai": {"models": {"gpt-6-astra": {"cost": {"input": 1, "output": 2}}}}}
+    NEW = {"openai": {"models": {"gpt-6-astra": {"cost": {"input": 10, "output": 50}}}}}
+
+    def _copy(self, tmp: str, age: float) -> Path:
+        path = Path(tmp) / "models.json"
+        path.write_text(json.dumps(self.OLD))
+        os.utime(path, (self.NOW - age, self.NOW - age))
+        return path
+
+    def test_a_copy_older_than_a_day_is_fetched_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._copy(tmp, 2 * 86400)
+            before = catalogue_rates("openai", "gpt-6-astra", path, Path(tmp) / "none")
+            fetched = refresh_catalogue(path, fetch=lambda: json.dumps(self.NEW).encode(),
+                                        now=lambda: self.NOW)
+            after = catalogue_rates("openai", "gpt-6-astra", path, Path(tmp) / "none")
+        self.assertTrue(fetched)
+        assert before is not None and after is not None
+        self.assertEqual((before.input, after.input), (1, 10))
+
+    def test_a_fresh_copy_is_not_fetched(self) -> None:
+        def fetch() -> bytes:
+            raise AssertionError("a copy fetched an hour ago must be kept")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(refresh_catalogue(self._copy(tmp, 3600), fetch=fetch, now=lambda: self.NOW))
+
+    def test_a_failed_or_garbled_fetch_keeps_the_old_copy(self) -> None:
+        def offline() -> bytes:
+            raise OSError("no network")
+
+        for fetch in (offline, lambda: b"<html>", lambda: b"[]"):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = self._copy(tmp, 2 * 86400)
+                self.assertFalse(refresh_catalogue(path, fetch=fetch, now=lambda: self.NOW))
+                self.assertEqual(json.loads(path.read_text()), self.OLD)
+
+    def test_a_missing_copy_is_fetched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sub" / "models.json"
+            self.assertTrue(refresh_catalogue(path, fetch=lambda: json.dumps(self.NEW).encode(),
+                                              now=lambda: self.NOW))
+            self.assertEqual(json.loads(path.read_text()), self.NEW)
+
+    def test_prices_come_from_the_copy_fetched_last(self) -> None:
+        """Ours, or the one opencode keeps when it ran more recently."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ours, opencodes = Path(tmp) / "ours.json", Path(tmp) / "opencode.json"
+            for path, age in ((ours, 10), (opencodes, 20)):
+                path.write_text("{}")
+                os.utime(path, (self.NOW - age, self.NOW - age))
+            self.assertEqual(newest_catalogue((ours, opencodes)), ours)
+            os.utime(opencodes, (self.NOW, self.NOW))
+            self.assertEqual(newest_catalogue((ours, opencodes)), opencodes)
+            self.assertEqual(newest_catalogue((Path(tmp) / "a", opencodes)), opencodes)
 
 
 class HarnessPricingTest(unittest.TestCase):
