@@ -126,7 +126,7 @@ module SandboxX11
 
   SCREEN_SIZE = "1600x900"
 
-  Screen = Struct.new(:display, :pid, :auth, :window, keyword_init: true)
+  Screen = Struct.new(:display, :pid, :auth, :window, :window_pid, keyword_init: true)
 
   # One Xauthority record that matches any display number. The server learns
   # the cookie through -auth before its display number is known (-displayfd
@@ -140,6 +140,14 @@ module SandboxX11
     [family].pack("n") + field.call(address) + field.call(number) + field.call("MIT-MAGIC-COOKIE-1") + field.call(cookie)
   end
 
+  # Xephyr in the window made for it (see sandbox-window.py), following its
+  # size; without one, Xvfb: a screen nobody sees.
+  def server_options(parent:)
+    return ["-screen", "0", "#{SCREEN_SIZE}x24"] unless parent
+
+    ["-parent", parent, "-resizeable", "-br", "-no-host-grab"]
+  end
+
   def start_screen(socket_dir, title, gui: true)
     # Every session has its own cookie as well as an isolated network
     # namespace, so an agent cannot connect to another session's screen.
@@ -148,28 +156,24 @@ module SandboxX11
     File.binwrite(auth, xauth_wildcard_entry(cookie))
     File.chmod(0o600, auth)
 
-    # -name sets only the res_name half of WM_CLASS (res_class stays "Xephyr",
-    # hard-coded). A random one finds this exact window afterwards, even with
-    # two sessions on one project; name_window then sets the real name.
-    token = "sandbox-agent-#{SecureRandom.hex(4)}"
+    window_pid, window = start_window(title) if gui
     # -noreset: by default Xephyr regenerates the whole server each time its
     # last client leaves. Until Chrome is up, every watch_screen poll is that
     # last client, so it reset several times a second, and one of those resets
     # eventually took it down, window and all, mid-session.
     # The log is there so that the next death has a cause.
-    server = gui ? "Xephyr" : "Xvfb"
-    log = File.join(socket_dir, gui ? "xephyr.log" : "xvfb.log")
+    server = window ? "Xephyr" : "Xvfb"
+    log = File.join(socket_dir, window ? "xephyr.log" : "xvfb.log")
     reader, writer = IO.pipe
-    options = gui ? ["-title", title, "-name", token, "-screen", SCREEN_SIZE, "-resizeable",
-                     "-br", "-no-host-grab"] : ["-screen", "0", "#{SCREEN_SIZE}x24"]
     pid = Process.spawn(server, "-displayfd", writer.fileno.to_s, "-auth", auth,
-                        *options, "-noreset", "-nolisten", "tcp",
+                        *server_options(parent: window), "-noreset", "-nolisten", "tcp",
                         writer.fileno => writer, out: log, err: log)
     writer.close
     number = IO.select([reader], nil, nil, 10) && reader.gets.to_s.strip
     reader.close
     unless number.to_s.match?(/\A\d+\z/)
       Process.kill("TERM", pid) rescue nil
+      stop_window(window_pid)
       warn "Private X server #{server} did not come up (see #{log})."
       return nil
     end
@@ -180,12 +184,7 @@ module SandboxX11
       file.write(xauth_entry(cookie, family: 256, address: Socket.gethostname, number: number))
     end
 
-    window = find_window(token) if gui
-    if window
-      name_window(window, title)
-      stow_window(window)
-    end
-    Screen.new(display: ":#{number}", pid: pid, auth: auth, window: window)
+    Screen.new(display: ":#{number}", pid: pid, auth: auth, window: window, window_pid: window_pid)
   rescue SystemCallError => e
     warn "Cannot start private X server (#{e.message}). Install xserver-xephyr and xvfb."
     nil
@@ -194,6 +193,35 @@ module SandboxX11
   def stop_screen(screen)
     Process.kill("TERM", screen.pid) rescue nil
     Process.waitpid(screen.pid) rescue nil
+    stop_window(screen.window_pid)
+  end
+
+  # The host window the screen is drawn in, made on the last desktop without
+  # taking the focus, and tiled there while you look at it: see
+  # sandbox-window.py. [pid, window id], or nil and a warning: the session
+  # then runs on an invisible screen.
+  def start_window(title)
+    reader, writer = IO.pipe
+    pid = Process.spawn("/usr/bin/python3", "-I", "-B", File.join(__dir__, "sandbox-window.py"),
+                        title, SCREEN_SIZE, out: writer, rlimit_core: 0)
+    writer.close
+    window = IO.select([reader], nil, nil, 5) && reader.gets.to_s.strip
+    reader.close
+    return [pid, window] if window.to_s.match?(/\A\d+\z/)
+
+    stop_window(pid)
+    warn "The sandbox's window did not come up (python3-xlib?): its screen is invisible this session."
+    nil
+  rescue SystemCallError => e
+    warn "Cannot start the sandbox's window (#{e.message}): its screen is invisible this session."
+    nil
+  end
+
+  def stop_window(pid)
+    return unless pid
+
+    Process.kill("TERM", pid) rescue nil
+    Process.waitpid(pid) rescue nil
   end
 
   def screen_env(screen) = { "DISPLAY" => screen.display, "XAUTHORITY" => screen.auth }
@@ -250,42 +278,8 @@ module SandboxX11
     ["/bin/sh", "-c", "#{i3} -c \"$0\" >/dev/null 2>&1 & exec \"$@\"", config, *cmd]
   end
 
-  # --onlyvisible: the window must be mapped before stow_window, or the window
-  # manager ignores the minimize request and maps it in plain view anyway.
-  def find_window(token)
-    20.times do
-      out, = Open3.capture2("xdotool", "search", "--onlyvisible", "--classname", "^#{token}$", err: File::NULL)
-      id = out.split.first
-      return id if id
-      sleep 0.25
-    end
-    nil
-  rescue SystemCallError
-    nil
-  end
-
-  # The dock labels a window by its WM_CLASS, which Xephyr hard-codes: without
-  # this, every session shows up as an identical "Xephyr".
-  def name_window(window, title)
-    system("xdotool", "set_window", "--classname", title, "--class", title, window,
-           out: File::NULL, err: File::NULL)
-  end
-
-  # A new window grabs the screen and the focus at every launch, though most
-  # sessions never need it. Send it to the last workspace, minimized: it stays
-  # in the dock under the session's name, for when it is wanted.
-  def stow_window(window)
-    count, = Open3.capture2("xdotool", "get_num_desktops", err: File::NULL)
-    last = count.to_i - 1
-    if last.positive?
-      system("xdotool", "set_desktop_for_window", window, last.to_s, out: File::NULL, err: File::NULL)
-    end
-    system("xdotool", "windowminimize", window, out: File::NULL, err: File::NULL)
-  end
-
   # Polls rather than listens: there is no X event API in stdlib Ruby, and two
-  # or three small commands every half second are cheap. Ends with Xephyr —
-  # closing its window loses the screen for the rest of the session.
+  # or three small commands every half second are cheap. Ends with Xephyr.
   def watch_screen(screen)
     env = screen_env(screen)
     fit = { normal: {}, size: nil }
