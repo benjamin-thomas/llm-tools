@@ -99,6 +99,23 @@ class BrowserScaleTest < Minitest::Test
   end
 end
 
+# Xephyr draws in the window sandbox-window.py made, already on the last
+# desktop: its own would show up on the one in use and take the focus.
+class ServerOptionsTest < Minitest::Test
+  def test_xephyr_draws_in_the_window_made_for_it
+    options = SandboxX11.server_options(parent: "71303169")
+
+    assert_equal %w[-parent 71303169], options.first(2)
+    assert_includes options, "-resizeable"
+    refute_includes options, "-title"
+    refute_includes options, "-screen"
+  end
+
+  def test_without_a_window_an_invisible_screen
+    assert_equal ["-screen", "0", "#{SandboxX11::SCREEN_SIZE}x24"], SandboxX11.server_options(parent: nil)
+  end
+end
+
 # Without a window manager, every window opens over the others at the top left.
 class WindowManagerTest < Minitest::Test
   def test_i3_starts_in_front_of_the_command

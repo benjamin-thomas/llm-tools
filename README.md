@@ -75,6 +75,15 @@ gets `BROWSER_SCALE`, for a project's browser tools to pass to Chrome
 panel alone), 1 once an ordinary monitor is plugged in, from `xrandr` at the
 session's start. `BROWSER_SCALE` set where `sandbox-agent` runs forces it.
 
+The private screen is drawn in a host window `sandbox-window.py` makes, already
+on the last workspace and asking for no focus, so it never shows up on the one
+in use. While you look at the last workspace, the sessions' windows lie side by
+side in a grid: arriving there, or a session opening or closing then, lays them
+out once, and a window you resize, maximize, minimize or take elsewhere is left
+alone. Leaving it, a window still at its tile's size gets its own size back, and
+so does the browser in it. Closing the window minimizes it: the screen lives as
+long as the session.
+
 When i3 is installed, it runs inside the sandbox on the private screen, so
 windows tile instead of piling up at the top left; `SANDBOX_WM=i3` tells agents
 they can arrange them with `i3-msg`. `--no-wm` leaves it out.
@@ -88,6 +97,7 @@ Clipboard tests use disposable X servers, not the real desktop clipboard:
 ```bash
 /usr/bin/ruby tests/sandbox_x11_test.rb
 /usr/bin/python3 -B -m unittest discover -s tests -p test_sandbox_clipboard.py
+/usr/bin/python3 -B -m unittest discover -s tests -p test_sandbox_window.py
 ```
 
 The integration suite also needs Bubblewrap, tmux and Herdr installed at
