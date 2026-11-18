@@ -264,17 +264,46 @@ module SandboxX11
   # `exec` bindings would run that outside.
   I3 = "/usr/bin/i3"
 
+  # The bindings, shown at the bottom of the screen: too many to remember.
+  I3_HINT = "Ctrl+Alt + ←→↑↓ focus · w tabs · s stacked · e tiled · f fullscreen · q close"
+
   # Its own config, not ~/.config/i3 (out of reach, and i3 would open its
-  # config wizard): no bindings, nothing it runs.
-  I3_CONFIG = <<~I3_CONFIG
-    # i3 config file (v4)
-    font pango:monospace 9
-  I3_CONFIG
+  # config wizard). Its bindings only move focus and change layouts; the one
+  # command it runs is i3bar's, printing the hint. In JSON, which i3bar draws
+  # at once (a plain first line waits for a second), then a sleep (i3bar shows
+  # an error once that command exits). Windows open as tabs, each as wide
+  # as the screen. Ctrl+Alt, because the host desktop keeps Super, and Alt
+  # alone is Chrome's (back, forward, its menu). The font follows the
+  # browser's scale.
+  def i3_config(scale)
+    factor = scale.to_f
+    factor = 1 unless factor.positive?
+    <<~I3_CONFIG
+      # i3 config file (v4)
+      font pango:sans #{(11 * factor).round}
+      workspace_layout tabbed
+      set $mod Control+Mod1
+      bindsym $mod+Left focus left
+      bindsym $mod+Right focus right
+      bindsym $mod+Up focus up
+      bindsym $mod+Down focus down
+      bindsym $mod+w layout tabbed
+      bindsym $mod+s layout stacking
+      bindsym $mod+e layout toggle split
+      bindsym $mod+f fullscreen toggle
+      bindsym $mod+q kill
+      bar {
+        status_command printf '%s\\n' '{"version":1}' '[' '[{"full_text":"#{I3_HINT}"}]'; exec sleep infinity
+        workspace_buttons no
+        tray_output none
+      }
+    I3_CONFIG
+  end
 
   # The command, i3 started in front of it on the sandbox's screen.
-  def with_i3(cmd, dir, i3: I3)
+  def with_i3(cmd, dir, scale: nil, i3: I3)
     config = File.join(dir, "i3.config")
-    File.write(config, I3_CONFIG)
+    File.write(config, i3_config(scale))
     ["/bin/sh", "-c", "#{i3} -c \"$0\" >/dev/null 2>&1 & exec \"$@\"", config, *cmd]
   end
 

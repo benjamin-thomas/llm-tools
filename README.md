@@ -85,8 +85,20 @@ so does the browser in it. Closing the window minimizes it: the screen lives as
 long as the session.
 
 When i3 is installed, it runs inside the sandbox on the private screen, so
-windows tile instead of piling up at the top left; `SANDBOX_WM=i3` tells agents
-they can arrange them with `i3-msg`. `--no-wm` leaves it out.
+windows open as tabs, each as wide as the screen, instead of piling up at the
+top left; `SANDBOX_WM=i3` tells agents they can arrange them with `i3-msg`.
+`--no-wm` leaves it out. Its bindings use Ctrl+Alt (Super stays the host's, Alt
+alone stays Chrome's) and never run a command; a bar at the bottom of the
+screen recalls them (printing that fixed line is the only command i3 runs):
+
+| Ctrl+Alt + | Does                          |
+|------------|-------------------------------|
+| ← → ↑ ↓    | Focus the next window that way |
+| w          | Tabs                          |
+| s          | Stacked                       |
+| e          | Tiled, toggling the split     |
+| f          | Fullscreen                    |
+| q          | Close the focused window      |
 
 Existing sessions must be stopped and relaunched with `sandbox-agent` to load
 changes to the relay. Reattaching to a multiplexer or restarting only the agent
