@@ -2,19 +2,17 @@
 
 The readings themselves live in token_recap (anthropic_usage, openai_usage,
 mistral_usage), which both tools share. The mapping here is pure and takes
-whatever the fetch produced (or None), so every source is testable offline.
+whatever the fetch produced (None, or why there is none), so every source is testable offline.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any
 
 from quota_gauges.gauge import Gauge
 from token_recap.anthropic_usage import ClaudeLimits
 from token_recap.codex import CodexLimits
-from token_recap.mistral_usage import READING, extension_error, mistral_budget, read_reading
+from token_recap.mistral_usage import MistralBudget
 
 _FIVE_HOURS = timedelta(hours=5)
 
@@ -75,24 +73,17 @@ def codex_gauges(
     return gauges
 
 
-def mistral_gauge(reading: dict[str, Any] | None, now: datetime) -> Gauge:
-    if reading is None:
-        return Gauge(
-            "mistral", "Mistral month", None,
-            problem="no reading yet: is the Chrome extension running?",
-        )
-    budget = mistral_budget(reading)
-    error = extension_error(reading)
-    if budget is None:
-        return Gauge("mistral", "Mistral month", None, problem=error or "unreadable reading")
+def mistral_gauge(reading: MistralBudget | str, now: datetime) -> Gauge:
+    """`reading` is the budget, or why there is none."""
+    if isinstance(reading, str):
+        return Gauge("mistral", "Mistral month", None, problem=reading)
     return Gauge(
         "mistral",
         "Mistral month",
-        budget.used,
-        _month_before(budget.resets),
-        budget.resets,
-        detail=f"{budget.detail} · {error}" if error else budget.detail,
-        as_of=budget.as_of,
+        reading.used,
+        _month_before(reading.resets),
+        reading.resets,
+        detail=reading.detail,
     )
 
 
@@ -102,6 +93,3 @@ def _month_before(moment: datetime) -> datetime:
         return moment.replace(year=moment.year - 1, month=12)
     return moment.replace(month=moment.month - 1)
 
-
-def read_mistral(path: Path = READING) -> dict[str, Any] | None:
-    return read_reading(path)

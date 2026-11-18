@@ -22,13 +22,7 @@ from token_recap.hyper_usage import (
     hyper_key,
     hyper_used,
 )
-from token_recap.mistral_usage import (
-    READING,
-    MistralBudget,
-    extension_error,
-    mistral_budget,
-    read_reading,
-)
+from token_recap.mistral_usage import MistralBudget, read_mistral
 from token_recap.harness import (
     API_SECTION,
     FREE_SECTION,
@@ -158,8 +152,6 @@ _SOURCES = {
 # Mistral's counts Vibe CLI, which the logs never see, so it gives a floor.
 _CAPACITY = {HYPER_SECTION: "none", MISTRAL_SECTION: "floor"}
 
-# A reading older than this no longer describes the meter.
-_MAX_AGE = timedelta(minutes=30)
 
 
 def mistral_window(now: datetime) -> Window:
@@ -214,13 +206,13 @@ def _hyper_meter(balance: float | None, asked: bool, keyed: bool) -> Meter:
     return Meter(None, "not available: credits endpoint unreachable")
 
 
-def _mistral_meter(budget: MistralBudget | None, now: datetime, error: str = "") -> Meter:
-    if budget is None:
-        return Meter(None, f"not available: {error or 'no reading from the Chrome extension'}")
-    note = f"{budget.detail} · {error}" if error else budget.detail
-    if budget.as_of is not None and now - budget.as_of > _MAX_AGE:
-        note += f" · as of {budget.as_of.astimezone(now.tzinfo):%d %b %H:%M}"
-    return Meter(budget.used, note)
+def _mistral_meter(reading: MistralBudget | str | None) -> Meter:
+    """`reading` is the budget, why there is none, or None when not asked."""
+    if reading is None:
+        return Meter(None, "not available: billing endpoint not asked (--offline)")
+    if isinstance(reading, str):
+        return Meter(None, f"not available: {reading}")
+    return Meter(reading.used, reading.detail)
 
 
 def _codex_meter(limits: CodexLimits | None) -> Meter:
@@ -245,12 +237,12 @@ def recap_text(
     color: bool | None = None,
     offline: bool = False,
     hyper_auth: Path = OPENCODE_AUTH,
-    mistral_reading: Path = READING,
+    mistral: Callable[[], MistralBudget | str] = lambda: read_mistral(os.environ),
     hyper_balance: Callable[[str], float | None] = fetch_hyper_balance,
     codex_auth: Path = CODEX_AUTH,
 ) -> str:
     key = hyper_key(os.environ, hyper_auth)
-    reading = read_reading(mistral_reading)
+    mistral_reading = None if offline else mistral()
     balance = None if offline or key is None else hyper_balance(key)
     codex_seen: CodexLimits | None = best_codex_limits(codex_auth, codex_root, now, offline)
     claude_seen: ClaudeLimits | None = best_claude_limits(claude_credentials, now, offline)
@@ -268,7 +260,7 @@ def recap_text(
         "grok": _grok_meter(grok_live, grok_seen),
         "codex": _codex_meter(codex_seen),
         HYPER_SECTION: _hyper_meter(balance, asked=not offline, keyed=key is not None),
-        MISTRAL_SECTION: _mistral_meter(mistral_budget(reading), now, extension_error(reading)),
+        MISTRAL_SECTION: _mistral_meter(mistral_reading),
     }
     plans = (
         ("claude", "Claude Code", lambda s, e: collect_claude(claude_root, s, e)),

@@ -147,18 +147,9 @@ Codex's is asked of the endpoint behind its `/status` screen, with the login
 in `~/.codex/auth.json`, and falls back to the last one Codex logged. The
 token is never refreshed here: Codex owns that, so run Codex if it expires.
 
-Mistral serves its Vibe budget only to a logged-in browser, so a Chrome
-extension reads it with your session and a native messaging host keeps it in
-`~/.cache/quota-gauges/mistral.json`. The session cookie never leaves Chrome.
-
-Chrome runs that host outside any sandbox, so it never runs from the repo,
-which sandboxed agents can edit. `./quota-gauges install` copies the extension
-and the host to `~/.local/lib/quota-gauges/` and points Chrome at the copy; it
-says which files changed, so read those changes before you run it.
-`sandbox-lib.rb` refuses to mount that directory, or Chrome's
-`NativeMessagingHosts`, writable. Then in `chrome://extensions`, Developer
-mode → Load unpacked → `~/.local/lib/quota-gauges/chrome/` (or reload it after
-a reinstall). It reads the budget within a few seconds, then every minute.
+Mistral's Vibe budget is asked of `api.mistral.ai/v1/billing/budget`, as
+Vibe's own footer does, with the API key from `$MISTRAL_API_KEY` or Vibe's
+`~/.vibe/.env`, read at run time.
 
 A GNOME Shell extension (`quota-gauges-gnome/`, GNOME 42) keeps three of the
 meters in the top bar, TopHat style: Claude's week, Codex's week (O) and
@@ -166,9 +157,12 @@ Mistral's month, each a small bar coloured by how it stands against
 an even pace, with a white tick at that pace. A click shows a card per
 meter; Claude's has a small bar for its 5h window, grey until it is 70% full,
 with a faint mark where an even pace through the 5h would be. It runs the
-installed `quota-gauges --json` every minute. `./quota-gauges install` puts it
-in `~/.local/share/gnome-shell/extensions/`, which `sandbox-lib.rb` also
-refuses to mount writable. After the first install, restart GNOME Shell
+installed `quota-gauges --json` every minute: GNOME runs it outside any
+sandbox, so never from the repo, which sandboxed agents can edit.
+`./quota-gauges install` copies the tools to `~/.local/lib/quota-gauges/` and
+the extension to `~/.local/share/gnome-shell/extensions/`, neither of which
+`sandbox-lib.rb` will mount writable; it says which files changed, so read
+those changes before you run it. After the first install, restart GNOME Shell
 (Alt+F2, `r` on Xorg; log out and in on Wayland), then:
 
 ```bash

@@ -1,21 +1,26 @@
-"""Mistral's monthly Vibe budget, as the Chrome extension last read it.
+"""Mistral's monthly Vibe budget, read live from the public billing API.
 
-Mistral serves the budget only to a browser session behind Cloudflare: an API
-key gets a 401 and a script gets a challenge page. So an extension fetches it
-from inside Chrome and its native host writes the answer here.
+Vibe's own footer reads it from `GET /v1/billing/budget` with the API key it
+keeps in ~/.vibe/.env, so this does the same. The key is only ever read at
+run time, from the environment or that file.
 """
 
 from __future__ import annotations
 
 import json
+import urllib.error
+import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from token_recap.parse import parse_iso
 
-READING = Path.home() / ".cache" / "quota-gauges" / "mistral.json"
+BUDGET_URL = "https://api.mistral.ai/v1/billing/budget"
+VIBE_ENV = Path.home() / ".vibe" / ".env"
+_KEY_VAR = "MISTRAL_API_KEY"
 _CURRENCY = {"EUR": "€", "USD": "$"}
 
 
@@ -26,37 +31,38 @@ class MistralBudget:
     size: float
     unit: str  # a currency symbol
     resets: datetime
-    as_of: datetime | None
 
     @property
     def detail(self) -> str:
         return f"{self.spent:.2f} {self.unit} of {self.size:g} {self.unit}"
 
 
-def read_reading(path: Path = READING) -> dict[str, Any] | None:
+def mistral_key(env: Mapping[str, str], dotenv: Path = VIBE_ENV) -> str | None:
+    """The environment's key first, else the one Vibe keeps in its .env."""
+    key = env.get(_KEY_VAR)
+    if key:
+        return key
     try:
-        blob: Any = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+        lines = dotenv.read_text().splitlines()
+    except OSError:
         return None
-    return blob if isinstance(blob, dict) else None
+    for line in lines:
+        name, sep, value = line.strip().removeprefix("export ").partition("=")
+        if sep and name.strip() == _KEY_VAR:
+            value = value.strip().strip("\"'")
+            return value or None
+    return None
 
 
-def extension_error(reading: dict[str, Any] | None) -> str:
-    """What the extension last failed on, if its last try failed. The native
-    host keeps the previous budget beside it, so both can be shown."""
-    error = reading.get("error") if reading else None
-    if not isinstance(error, str) or not error:
-        return ""
-    # 401/403 is the usual one: the chat.mistral.ai session has expired.
-    hint = " · log in to chat.mistral.ai" if error in ("HTTP 401", "HTTP 403") else ""
-    return f"extension: {error}{hint}"
-
-
-def mistral_budget(reading: dict[str, Any] | None) -> MistralBudget | None:
-    if reading is None:
+def parse_budget(body: Any) -> MistralBudget | None:
+    """The Vibe budget in the billing answer; it also carries an API budget,
+    which is not the subscription's."""
+    if not isinstance(body, dict):
         return None
-    budget = reading.get("budget")
-    budget = budget if isinstance(budget, dict) else {}
+    raw: Any = cast(dict[str, Any], body).get("vibe_budget")
+    if not isinstance(raw, dict):
+        return None
+    budget = cast(dict[str, Any], raw)
     percent = budget.get("usage_percentage")
     size = budget.get("initial_budget")
     resets = parse_iso(str(budget.get("reset_at") or ""))
@@ -69,5 +75,28 @@ def mistral_budget(reading: dict[str, Any] | None) -> MistralBudget | None:
         size=float(size),
         unit=_CURRENCY.get(currency, currency),
         resets=resets,
-        as_of=parse_iso(str(reading.get("fetched_at") or "")),
     )
+
+
+def fetch_budget(key: str, timeout: float = 5.0) -> MistralBudget | str:
+    """The budget, or why there is none."""
+    request = urllib.request.Request(
+        BUDGET_URL,
+        headers={"Authorization": f"Bearer {key}", "User-Agent": "token-recap"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body: Any = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        # 403 is a key whose member lacks the usage permission.
+        return f"billing endpoint answered HTTP {exc.code}"
+    except (urllib.error.URLError, OSError, ValueError):
+        return "billing endpoint unreachable"
+    return parse_budget(body) or "no Vibe budget in the billing answer"
+
+
+def read_mistral(env: Mapping[str, str], dotenv: Path = VIBE_ENV) -> MistralBudget | str:
+    key = mistral_key(env, dotenv)
+    if key is None:
+        return f"no Mistral API key (${_KEY_VAR} or {dotenv})"
+    return fetch_budget(key)

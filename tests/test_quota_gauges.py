@@ -17,10 +17,11 @@ from quota_gauges.gauge import (
     runs_out_at,
     tone,
 )
-from quota_gauges.sources import claude_gauges, codex_gauges, mistral_gauge, read_mistral
+from quota_gauges.sources import claude_gauges, codex_gauges, mistral_gauge
 from quota_gauges.cli import as_json, render_line
 from token_recap.anthropic_usage import ClaudeLimits, limits_from_statusline
 from token_recap.codex import CodexLimits
+from token_recap.mistral_usage import mistral_key, parse_budget, read_mistral
 from token_recap.windows import Window
 
 PARIS = ZoneInfo("Europe/Paris")
@@ -235,63 +236,71 @@ class StatuslineSourceTest(unittest.TestCase):
         self.assertIsNone(limits_from_statusline({}, NOW))
 
 
+# What /v1/billing/budget answers, trimmed.
 MISTRAL = {
-    "fetched_at": "2026-10-11T13:30:00Z",
-    "budget": {
+    "vibe_budget": {
         "usage_percentage": 0.6757141233333334,
-        "initial_budget": 255,
+        "initial_budget": 255.0,
         "currency": "EUR",
         "reset_at": "2026-11-01T00:00:00Z",
         "payg_enabled": False,
+    },
+    "api_budget": {
+        "usage_percentage": 50.0,
+        "initial_budget": 25.5,
+        "currency": "EUR",
+        "reset_at": "2026-11-01T00:00:00Z",
     },
 }
 
 
 class MistralSourceTest(unittest.TestCase):
+    def _budget(self, body: object = MISTRAL):
+        budget = parse_budget(body)
+        assert budget is not None
+        return budget
+
     def test_the_month_runs_up_to_the_stated_reset(self) -> None:
-        gauge = mistral_gauge(MISTRAL, NOW)
+        gauge = mistral_gauge(self._budget(), NOW)
         utc = timezone.utc
         self.assertEqual(gauge.start, datetime(2026, 10, 1, tzinfo=utc))
         self.assertEqual(gauge.end, datetime(2026, 11, 1, tzinfo=utc))
         assert gauge.used is not None
         self.assertAlmostEqual(gauge.used, 0.006757, places=6)
         self.assertEqual(gauge.detail, "1.72 € of 255 €")
-        self.assertEqual(gauge.as_of, datetime(2026, 10, 11, 13, 30, tzinfo=utc))
+        self.assertIsNone(gauge.as_of)  # read live
 
     def test_a_january_reset_reaches_back_into_december(self) -> None:
-        reading = json.loads(json.dumps(MISTRAL))
-        reading["budget"]["reset_at"] = "2027-01-01T00:00:00Z"
-        gauge = mistral_gauge(reading, NOW)
+        body = json.loads(json.dumps(MISTRAL))
+        body["vibe_budget"]["reset_at"] = "2027-01-01T00:00:00Z"
+        gauge = mistral_gauge(self._budget(body), NOW)
         self.assertEqual(gauge.start, datetime(2026, 12, 1, tzinfo=timezone.utc))
 
-    def test_no_reading_points_at_the_extension(self) -> None:
-        gauge = mistral_gauge(None, NOW)
+    def test_no_budget_says_why(self) -> None:
+        gauge = mistral_gauge("billing endpoint answered HTTP 401", NOW)
         self.assertIsNone(gauge.used)
-        self.assertIn("Chrome extension", gauge.problem)
+        self.assertEqual(gauge.problem, "billing endpoint answered HTTP 401")
 
-    def test_an_extension_error_is_shown_beside_the_last_good_budget(self) -> None:
-        reading = dict(MISTRAL, error="HTTP 401", error_at="2026-10-11T15:00:00Z")
-        gauge = mistral_gauge(reading, NOW)
-        self.assertIsNotNone(gauge.used)
-        self.assertIn("HTTP 401", gauge.detail)
+    def test_the_api_budget_is_not_the_vibe_one(self) -> None:
+        self.assertIsNone(parse_budget({"api_budget": MISTRAL["api_budget"]}))
 
-    def test_an_extension_error_with_no_budget_yet_is_the_problem(self) -> None:
-        gauge = mistral_gauge({"error": "HTTP 401", "error_at": "t"}, NOW)
-        self.assertIsNone(gauge.used)
-        self.assertIn("HTTP 401", gauge.problem)
-        self.assertIn("chat.mistral.ai", gauge.problem)
+    def test_a_malformed_answer_is_no_budget(self) -> None:
+        self.assertIsNone(parse_budget({"vibe_budget": {"usage_percentage": "x"}}))
+        self.assertIsNone(parse_budget([]))
 
-    def test_a_malformed_reading_is_no_reading(self) -> None:
-        self.assertIsNone(mistral_gauge({"budget": {"usage_percentage": "x"}}, NOW).used)
-
-    def test_the_reading_is_read_from_its_file(self) -> None:
+    def test_the_key_comes_from_the_environment_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "mistral.json"
-            self.assertIsNone(read_mistral(path))
-            path.write_text(json.dumps(MISTRAL))
-            self.assertEqual(read_mistral(path), MISTRAL)
-            path.write_text("{not json")
-            self.assertIsNone(read_mistral(path))
+            dotenv = Path(tmp) / ".env"
+            dotenv.write_text("OTHER=1\nMISTRAL_API_KEY='from-file'\n")
+            self.assertEqual(mistral_key({"MISTRAL_API_KEY": "from-env"}, dotenv), "from-env")
+            self.assertEqual(mistral_key({}, dotenv), "from-file")
+            self.assertIsNone(mistral_key({}, Path(tmp) / "missing"))
+
+    def test_without_a_key_nothing_is_asked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            got = read_mistral({}, Path(tmp) / "missing")
+        self.assertIsInstance(got, str)
+        self.assertIn("no Mistral API key", str(got))
 
 
 class RenderTest(unittest.TestCase):
@@ -327,11 +336,14 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(got["tone"], "ok")  # by how full it is, not by pace
 
     def test_a_missing_reading_says_why(self) -> None:
-        line = render_line(mistral_gauge(None, NOW), NOW)
-        self.assertIn("Chrome extension", line)
+        line = render_line(mistral_gauge("billing endpoint unreachable", NOW), NOW)
+        self.assertIn("billing endpoint unreachable", line)
 
     def test_a_stale_reading_says_how_old(self) -> None:
-        gauge = mistral_gauge(MISTRAL, NOW + timedelta(hours=3))
+        gauge = Gauge(
+            "claude-week", "Claude week", 0.5, TUESDAY, TUESDAY + timedelta(days=7),
+            as_of=datetime(2026, 10, 11, 13, 30, tzinfo=timezone.utc),
+        )
         self.assertIn("as of 11 Oct 15:30", render_line(gauge, NOW + timedelta(hours=3)))
 
     def test_json_carries_the_verdict_not_just_the_reading(self) -> None:

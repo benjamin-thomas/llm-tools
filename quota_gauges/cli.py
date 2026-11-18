@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -20,10 +21,10 @@ from quota_gauges.sources import (
     claude_gauges,
     codex_gauges,
     mistral_gauge,
-    read_mistral,
 )
 from token_recap.anthropic_usage import best_claude_limits
 from token_recap.format import fmt_span
+from token_recap.mistral_usage import read_mistral
 from token_recap.openai_usage import AUTH as CODEX_AUTH, best_codex_limits
 from token_recap.windows import aware_local, local_tz
 
@@ -40,7 +41,7 @@ def collect(now: datetime) -> list[Gauge]:
         best_codex_limits(CODEX_AUTH, CODEX_SESSIONS, now), now,
         problem="no reading: not logged in to Codex, or its token expired (run codex)",
     )
-    gauges.append(mistral_gauge(read_mistral(), now))
+    gauges.append(mistral_gauge(read_mistral(os.environ), now))
     return gauges
 
 
@@ -153,8 +154,8 @@ def main(argv: list[str] | None = None) -> int:
         nargs="?",
         choices=["install"],
         help=(
-            f"install: copy the Mistral extension and its native host to {DEST} "
-            "and point Chrome at them. Rerun after reading any change to them."
+            f"install: copy the tools to {DEST} and the GNOME extension beside "
+            "the others. Rerun after reading any change to them."
         ),
     )
     p.add_argument("--json", action="store_true", help="Machine-readable output.")
@@ -163,7 +164,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "install":
         for line in install(Path(__file__).resolve().parent.parent):
             print(line)
-        print(f"Chrome: load the unpacked extension from {DEST / 'chrome'}, or reload it.")
         return 0
     now = aware_local(None, local_tz())
     gauges = collect(now)

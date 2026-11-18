@@ -27,6 +27,7 @@ from token_recap.catalogue import catalogue_rates, newest_catalogue, refresh_cat
 from token_recap.harness import display_rates
 from token_recap.opencode import collect_opencode
 from token_recap.pi import collect_pi
+from token_recap.mistral_usage import MistralBudget, parse_budget
 from token_recap.recap import api_window, mistral_window, recap_text
 
 PARIS = ZoneInfo("Europe/Paris")
@@ -236,11 +237,11 @@ class HyperReportTest(unittest.TestCase):
         tokens: dict[str, object] | None = None,
         *,
         balance: float | None = None,
-        mistral: dict[str, object] | None = None,
+        mistral: MistralBudget | str | None = None,
         created: datetime | None = None,
     ) -> str:
         """A one-row report. `balance` stands in for Hyper's live answer and
-        `mistral` for the Chrome extension's reading."""
+        `mistral` for Mistral's billing answer."""
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "opencode.db"
             con = sqlite3.connect(db)
@@ -262,9 +263,9 @@ class HyperReportTest(unittest.TestCase):
                 gone,  # pi root
                 db,
                 color=False,
-                offline=balance is None,
+                offline=balance is None and mistral is None,
                 hyper_auth=self._hyper_auth(tmp),
-                mistral_reading=self._mistral_reading(tmp, mistral),
+                mistral=lambda: mistral or "unasked",
                 hyper_balance=lambda key: balance,
                 codex_auth=gone,
             )
@@ -273,13 +274,6 @@ class HyperReportTest(unittest.TestCase):
     def _hyper_auth(tmp: str) -> Path:
         path = Path(tmp) / "auth.json"
         path.write_text(json.dumps({"hyper": {"type": "api", "key": "k"}}))
-        return path
-
-    @staticmethod
-    def _mistral_reading(tmp: str, reading: dict[str, object] | None) -> Path:
-        path = Path(tmp) / "mistral.json"
-        if reading is not None:
-            path.write_text(json.dumps(reading))
         return path
 
     def test_the_hyper_card_reads_the_daily_allowance(self) -> None:
@@ -297,24 +291,23 @@ class HyperReportTest(unittest.TestCase):
         self.assertIn("used", card)
         self.assertIn("--offline", card)
 
-    def test_the_mistral_card_reads_the_extension_reading(self) -> None:
-        reading = {
-            "fetched_at": "2026-08-29T19:55:00Z",
-            "budget": {"usage_percentage": 20.0, "initial_budget": 255, "currency": "EUR",
-                       "reset_at": "2026-09-01T00:00:00Z"},
-        }
-        card = "\n".join(self._card(self._report("mistral", mistral=reading), "Mistral"))
+    def test_the_mistral_card_reads_the_billing_budget(self) -> None:
+        budget = parse_budget({"vibe_budget": {
+            "usage_percentage": 20.0, "initial_budget": 255, "currency": "EUR",
+            "reset_at": "2026-09-01T00:00:00Z",
+        }})
+        card = "\n".join(self._card(self._report("mistral", mistral=budget), "Mistral"))
         self.assertIn("20% · pace 93%", card)
         self.assertIn("51.00 € of 255 €", card)
 
-    def test_the_mistral_card_shows_an_extension_error(self) -> None:
-        reading = {"error": "HTTP 401", "error_at": "2026-08-29T19:55:00Z"}
-        card = "\n".join(self._card(self._report("mistral", mistral=reading), "Mistral"))
+    def test_the_mistral_card_says_why_it_has_no_budget(self) -> None:
+        reason = "billing endpoint answered HTTP 401"
+        card = "\n".join(self._card(self._report("mistral", mistral=reason), "Mistral"))
         self.assertIn("HTTP 401", card)
 
-    def test_without_a_reading_the_mistral_card_points_at_the_extension(self) -> None:
+    def test_offline_the_mistral_card_says_its_meter_was_not_asked(self) -> None:
         card = "\n".join(self._card(self._report("mistral"), "Mistral"))
-        self.assertIn("Chrome extension", card)
+        self.assertIn("--offline", card)
 
     @staticmethod
     def _card(report: str, title: str) -> list[str]:
