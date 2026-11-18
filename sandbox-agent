@@ -540,7 +540,7 @@ SandboxX11.watch_screen(screen) if screen.window
 clipboard_pid = SandboxX11.start_clipboard(screen)
 at_exit { SandboxX11.stop_clipboard(clipboard_pid) } if clipboard_pid
 if flags[:wm] && screen.window && File.executable?(SandboxX11::I3)
-  cmd = SandboxX11.with_i3(cmd, socket_dir)
+  cmd = SandboxX11.with_i3(cmd, socket_dir, scale: scale)
   args.push("--setenv", "SANDBOX_WM", "i3")
 end
 

@@ -134,4 +134,43 @@ class WindowManagerTest < Minitest::Test
       assert_match(/\A# i3 config file \(v4\)/, File.read("#{dir}/i3.config"))
     end
   end
+
+  # Anything in the private screen can press keys (XTEST): a binding must
+  # never be a way to run something. The one command prints fixed text.
+  def test_the_config_runs_only_the_hint
+    config = SandboxX11.i3_config(nil)
+    hint = config.lines.grep(/status_command/)
+    json = %({"version":1}' '[' '[{"full_text":"#{SandboxX11::I3_HINT}"}])
+    assert_equal ["  status_command printf '%s\\n' '#{json}'; exec sleep infinity\n"], hint
+    refute_match(/\bexec/, (config.lines - hint).join)
+  end
+
+  # Quoted twice, for the shell and for JSON: it must not get out of either.
+  def test_the_hint_cannot_break_its_quotes
+    refute_match(/["'\\]/, SandboxX11::I3_HINT)
+  end
+
+  def test_the_hint_names_every_binding
+    arrows = { "Left" => "←", "Right" => "→", "Up" => "↑", "Down" => "↓" }
+    keys = SandboxX11.i3_config(nil).scan(/^bindsym \$mod\+(\S+)/).flatten
+    refute_empty keys
+    keys.each { |key| assert_includes SandboxX11::I3_HINT, arrows.fetch(key, "#{key} ") }
+  end
+
+  def test_i3_accepts_the_config
+    skip "i3 not installed" unless File.executable?(SandboxX11::I3)
+    Dir.mktmpdir("wm-") do |dir|
+      config = File.join(dir, "i3.config")
+      File.write(config, SandboxX11.i3_config("2"))
+      out, status = Open3.capture2e({ "DISPLAY" => nil }, SandboxX11::I3, "-C", "-c", config)
+      assert status.success?, out
+    end
+  end
+
+  # Tab titles drawn at the browser's scale, as Chrome's own are.
+  def test_the_title_font_follows_the_browser_scale
+    assert_includes SandboxX11.i3_config(nil), "font pango:sans 11\n"
+    assert_includes SandboxX11.i3_config("2"), "font pango:sans 22\n"
+    assert_includes SandboxX11.i3_config("bogus"), "font pango:sans 11\n"
+  end
 end
