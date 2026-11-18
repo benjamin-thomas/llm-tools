@@ -31,13 +31,11 @@ const PopupMenu = imports.ui.popupMenu;
 const COMMAND = [GLib.build_filenamev([GLib.get_home_dir(), '.local', 'lib', 'quota-gauges', 'quota-gauges']), '--json'];
 const INTERVAL_SECONDS = 60;
 // [key, initial, name, span, brand colour, show the amount left, 5h key].
-// The brand colour says whose gauge it is. Hyper's card also names what is
-// left, in the Hyper Credits (HC) it bills in. Codex goes by O (OpenAI): C is
+// The brand colour says whose gauge it is. Codex goes by O (OpenAI): C is
 // Claude's, and X would read as xAI. Its Pro Lite plan has no 5h window.
 const SHOWN = [
     ['claude-week', 'C', 'Claude', 'week', '#d97757', false, 'claude-5h'],
     ['codex-week', 'O', 'Codex', 'week', '#c0c4cc', false, null],
-    ['hyper', 'H', 'Hyper', 'day', '#ff60ff', true, null],
     ['mistral', 'M', 'Mistral', 'month', '#fa520f', false, null],
 ];
 // The tones quota-gauges hands out (quota_gauges/gauge.py: tone), lightened

@@ -17,9 +17,7 @@ from quota_gauges.gauge import (
     runs_out_at,
     tone,
 )
-from quota_gauges.sources import claude_gauges, codex_gauges, hyper_gauge, mistral_gauge, read_mistral, record_balance
-from token_recap.hyper_usage import hyper_key
-from token_recap.windows import hyper_window
+from quota_gauges.sources import claude_gauges, codex_gauges, mistral_gauge, read_mistral
 from quota_gauges.cli import as_json, render_line
 from token_recap.anthropic_usage import ClaudeLimits, limits_from_statusline
 from token_recap.codex import CodexLimits
@@ -235,78 +233,6 @@ class StatuslineSourceTest(unittest.TestCase):
     def test_a_malformed_blob_says_nothing(self) -> None:
         self.assertIsNone(limits_from_statusline({"fetched_at": 1, "seven_day": {}}, NOW))
         self.assertIsNone(limits_from_statusline({}, NOW))
-
-
-class HyperLogTest(unittest.TestCase):
-    """Hyper does not say when it refills, so every change of the balance is
-    kept with its time: the jump back up shows when the day really turns."""
-
-    def test_a_change_is_appended_and_a_repeat_is_not(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            log = Path(tmp) / "sub" / "hyper-balance.log"
-            record_balance(log, NOW, 86)
-            record_balance(log, NOW + timedelta(minutes=1), 86)
-            record_balance(log, NOW + timedelta(minutes=2), 250)
-            lines = log.read_text().splitlines()
-        self.assertEqual(lines, [
-            f"{NOW.isoformat()} 86",
-            f"{(NOW + timedelta(minutes=2)).isoformat()} 250",
-        ])
-
-    def test_no_balance_records_nothing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            log = Path(tmp) / "hyper-balance.log"
-            record_balance(log, NOW, None)
-            self.assertFalse(log.exists())
-
-
-class HyperSourceTest(unittest.TestCase):
-    def test_the_day_runs_from_the_last_refresh(self) -> None:
-        """16:33 UTC, which is 18:33 in Paris in summer."""
-        start, end = hyper_window(NOW)
-        self.assertEqual(start, datetime(2026, 10, 10, 18, 33, tzinfo=PARIS))
-        self.assertEqual(end, datetime(2026, 10, 11, 18, 33, tzinfo=PARIS))
-
-    def test_after_the_refresh_the_new_day_has_begun(self) -> None:
-        start, _ = hyper_window(datetime(2026, 10, 11, 18, 40, tzinfo=PARIS))
-        self.assertEqual(start, datetime(2026, 10, 11, 18, 33, tzinfo=PARIS))
-
-    def test_the_refresh_keeps_to_utc_across_the_clock_change(self) -> None:
-        """From 25 Oct Paris is UTC+1, so the refresh moves to 17:33 there,
-        and every Hyper day stays 24 hours long."""
-        start, end = hyper_window(datetime(2026, 10, 26, 20, 0, tzinfo=PARIS))
-        self.assertEqual(start, datetime(2026, 10, 26, 17, 33, tzinfo=PARIS))
-        self.assertEqual(end - start, timedelta(hours=24))
-
-    def test_used_is_what_the_balance_no_longer_holds(self) -> None:
-        gauge = hyper_gauge(89, NOW)
-        assert gauge.used is not None
-        self.assertAlmostEqual(gauge.used, 161 / 250)
-        self.assertEqual(gauge.detail, "89 HC left of 250")
-        self.assertTrue(gauge.paced)
-
-    def test_a_topped_up_balance_reads_as_nothing_used(self) -> None:
-        self.assertEqual(hyper_gauge(400, NOW).used, 0.0)
-
-    def test_no_balance_says_why(self) -> None:
-        gauge = hyper_gauge(None, NOW, problem="no API key")
-        self.assertIsNone(gauge.used)
-        self.assertEqual(gauge.problem, "no API key")
-
-    def test_the_key_comes_from_the_environment_first(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            auth = Path(tmp) / "auth.json"
-            auth.write_text(json.dumps({"hyper": {"type": "api", "key": "from-file"}}))
-            self.assertEqual(hyper_key({"HYPER_API_KEY": "from-env"}, auth), "from-env")
-            self.assertEqual(hyper_key({}, auth), "from-file")
-
-    def test_an_oauth_entry_is_not_an_api_key(self) -> None:
-        """pi's short-lived token: refreshing it is pi's job, not ours."""
-        with tempfile.TemporaryDirectory() as tmp:
-            auth = Path(tmp) / "auth.json"
-            auth.write_text(json.dumps({"hyper": {"type": "oauth", "access": "t"}}))
-            self.assertIsNone(hyper_key({}, auth))
-            self.assertIsNone(hyper_key({}, Path(tmp) / "missing.json"))
 
 
 MISTRAL = {

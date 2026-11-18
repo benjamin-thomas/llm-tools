@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,17 +17,13 @@ from quota_gauges.gauge import (
 )
 from quota_gauges.install import DEST, install
 from quota_gauges.sources import (
-    HYPER_LOG,
     claude_gauges,
     codex_gauges,
-    hyper_gauge,
     mistral_gauge,
     read_mistral,
-    record_balance,
 )
 from token_recap.anthropic_usage import best_claude_limits
 from token_recap.format import fmt_span
-from token_recap.hyper_usage import fetch_hyper_balance, hyper_key
 from token_recap.openai_usage import AUTH as CODEX_AUTH, best_codex_limits
 from token_recap.windows import aware_local, local_tz
 
@@ -45,13 +40,6 @@ def collect(now: datetime) -> list[Gauge]:
         best_codex_limits(CODEX_AUTH, CODEX_SESSIONS, now), now,
         problem="no reading: not logged in to Codex, or its token expired (run codex)",
     )
-    key = hyper_key(os.environ)
-    if key is None:
-        gauges.append(hyper_gauge(None, now, problem="no Hyper API key"))
-    else:
-        balance = fetch_hyper_balance(key)
-        record_balance(HYPER_LOG, now, balance)
-        gauges.append(hyper_gauge(balance, now, problem="credits endpoint unreachable"))
     gauges.append(mistral_gauge(read_mistral(), now))
     return gauges
 
@@ -158,7 +146,7 @@ def as_json(gauges: list[Gauge], now: datetime) -> list[dict[str, Any]]:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        description="Subscription meters against an even pace: Claude, Codex, Hyper, Mistral."
+        description="Subscription meters against an even pace: Claude, Codex, Mistral."
     )
     p.add_argument(
         "command",

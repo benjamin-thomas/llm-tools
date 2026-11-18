@@ -1,7 +1,7 @@
 """Each provider's meter, turned into Gauges.
 
 The readings themselves live in token_recap (anthropic_usage, openai_usage,
-hyper_usage, mistral_usage), which both tools share. The mapping here is pure and takes
+mistral_usage), which both tools share. The mapping here is pure and takes
 whatever the fetch produced (or None), so every source is testable offline.
 """
 
@@ -14,9 +14,7 @@ from typing import Any
 from quota_gauges.gauge import Gauge
 from token_recap.anthropic_usage import ClaudeLimits
 from token_recap.codex import CodexLimits
-from token_recap.hyper_usage import HYPER_DAILY, hyper_used
 from token_recap.mistral_usage import READING, extension_error, mistral_budget, read_reading
-from token_recap.windows import hyper_window
 
 _FIVE_HOURS = timedelta(hours=5)
 
@@ -75,36 +73,6 @@ def codex_gauges(
         limits.window.start, limits.window.end, as_of=limits.as_of,
     ))
     return gauges
-
-
-def hyper_gauge(balance: float | None, now: datetime, problem: str = "") -> Gauge:
-    start, end = hyper_window(now)
-    if balance is None:
-        return Gauge("hyper", "Hyper day", None, start, end, problem=problem)
-    return Gauge(
-        "hyper", "Hyper day", hyper_used(balance), start, end,
-        detail=f"{balance:g} HC left of {HYPER_DAILY}",
-    )
-
-
-# Hyper's API gives no refresh time, so every change of the balance is kept
-# here with its time: the day turns where the balance jumps back up, which is
-# what HYPER_RESET (token_recap/windows.py) is checked against.
-HYPER_LOG = Path.home() / ".cache" / "quota-gauges" / "hyper-balance.log"
-
-
-def record_balance(log: Path, now: datetime, balance: float | None) -> None:
-    if balance is None:
-        return
-    try:
-        lines = log.read_text().splitlines()
-    except OSError:
-        lines = []
-    if lines and lines[-1].split()[-1] == f"{balance:g}":
-        return
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("a") as out:
-        out.write(f"{now.isoformat()} {balance:g}\n")
 
 
 def mistral_gauge(reading: dict[str, Any] | None, now: datetime) -> Gauge:

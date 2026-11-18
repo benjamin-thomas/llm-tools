@@ -160,9 +160,9 @@ says which files changed, so read those changes before you run it.
 mode → Load unpacked → `~/.local/lib/quota-gauges/chrome/` (or reload it after
 a reinstall). It reads the budget within a few seconds, then every minute.
 
-A GNOME Shell extension (`quota-gauges-gnome/`, GNOME 42) keeps four of the
-meters in the top bar, TopHat style: Claude's week, Codex's week (O), Hyper's
-day and Mistral's month, each a small bar coloured by how it stands against
+A GNOME Shell extension (`quota-gauges-gnome/`, GNOME 42) keeps three of the
+meters in the top bar, TopHat style: Claude's week, Codex's week (O) and
+Mistral's month, each a small bar coloured by how it stands against
 an even pace, with a white tick at that pace. A click shows a card per
 meter; Claude's has a small bar for its 5h window, grey until it is 70% full,
 with a faint mark where an even pace through the 5h would be. It runs the
